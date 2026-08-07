@@ -1,5 +1,8 @@
 from typing import Mapping
 
+
+from numb_project.constants import *
+
 def get_from_dict_or_val(
     val: int | Mapping[str, int], key: str, log: str
 ) -> int:

@@ -1,9 +1,11 @@
+from typing import Any
+
 from shimmer import ContrastiveLoss, GWLosses2Domains, GWModule, GlobalWorkspaceBase, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
 from shimmer.modules.losses import GWLosses
 import torch
 from torch.optim import AdamW
 
-from numb_project.domain_module import LoadedDomainConfig, load_pretrained_domains
+from numb_project.domain_module import LoadedDomainConfig, load_domains
 
 
 class MyGlobalWorkspace(GlobalWorkspaceBase):
@@ -13,10 +15,10 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         selection_mod: SelectionBase,
         loss_mod: GWLosses,
         optim_lr: float = 1e-3,
-    ):
+    ) -> None:
         super().__init__(gw_mod, selection_mod, loss_mod, optim_lr)
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> dict[str, AdamW]:
         optimizer = AdamW(
             self.parameters(),
             lr=self.optim_lr,
@@ -25,7 +27,7 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         return {"optimizer": optimizer}
 
 class MyCustomGWLosses(GWLosses2Domains):
-    def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn):
+    def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn) -> None:
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
 
     def step(
@@ -45,15 +47,15 @@ class MyCustomGWLosses(GWLosses2Domains):
         return LossOutput(combine_loss(metrics, self.loss_coefs), metrics)
 
 
-def get_global_workspace_params(config):
+def get_global_workspace_mods(
+        config: dict[str, Any],
+        domains_configs: list[LoadedDomainConfig]
+        ) -> tuple[GWModule, SingleDomainSelection, MyCustomGWLosses]:
     selection_mod = SingleDomainSelection()
     contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
 
-    image_domain_config = LoadedDomainConfig(domain_type="image")
-    digit_domain_config = LoadedDomainConfig(domain_type="digit")
-
-    domain_modules, gw_encoders, gw_decoders = load_pretrained_domains(
-        [image_domain_config, digit_domain_config],
+    domain_modules, gw_encoders, gw_decoders = load_domains(
+        domains_configs,
         config["global_workspace"]["latent_dim"],
         config["global_workspace"]["encoders"]["hidden_dim"],
         config["global_workspace"]["encoders"]["n_layers"],
@@ -63,7 +65,7 @@ def get_global_workspace_params(config):
 
     gw_mod = GWModule(
         domain_modules= domain_modules,
-        workspace_dim=12,
+        workspace_dim=config["global_workspace"]["latent_dim"],
         gw_encoders=gw_encoders,
         gw_decoders=gw_decoders,
         fusion_activation_fn=torch.tanh
@@ -80,8 +82,8 @@ def get_global_workspace_params(config):
     return gw_mod, selection_mod, loss_mod
 
 
-def setup_global_workspace(config):
-    gw_mod, selection_mod, loss_mod = get_global_workspace_params(config)
+def setup_global_workspace(config: dict[str, Any], domains_configs: list[LoadedDomainConfig]) -> MyGlobalWorkspace:
+    gw_mod, selection_mod, loss_mod = get_global_workspace_mods(config, domains_configs)
 
     global_workspace = MyGlobalWorkspace(
         gw_mod=gw_mod,

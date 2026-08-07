@@ -1,3 +1,5 @@
+from typing import Any
+
 from lightning.pytorch import LightningDataModule
 from lightning.pytorch.utilities import CombinedLoader
 import torch
@@ -5,31 +7,30 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 import torch.nn.functional as F
 
+from numb_project.constants import BASE
+
 class MnistDataset(Dataset):
-    def __init__(self, mnist_dataset, domain):
+    def __init__(self, mnist_dataset: datasets.MNIST, domain: list[str]) -> None:
         self.mnist_dataset = mnist_dataset
         self.domain = domain
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.mnist_dataset)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict[str, Any]:
         image = self.mnist_dataset[idx][0]
         digit = self.mnist_dataset[idx][1]
-        digit_one_hot = F.one_hot(torch.tensor(digit), num_classes=10).float()
+        digit_one_hot = F.one_hot(torch.tensor(digit), num_classes=BASE).float()
 
-        if self.domain == ['image']:
-            return {"image": image}
-        elif self.domain == ['digit']:
-            return {"digit": digit_one_hot}
-        else:
-            return {
-                "image": image,
-                "digit": digit_one_hot
-            }
+        available = {
+            "image": image,
+            "digit": digit_one_hot,
+        }
+
+        return {key: available[key] for key in self.domain}
 
 class MnistDataModule(LightningDataModule):
-    def __init__(self, batch_size):
+    def __init__(self, batch_size) -> None:
         super().__init__()
 
         self.batch_size = batch_size
@@ -47,7 +48,7 @@ class MnistDataModule(LightningDataModule):
             ['image', 'digit']
         ]
 
-    def __get_dataloaders(self, split):
+    def __get_dataloaders(self, split: str) -> dict[frozenset[str], DataLoader]:
         mnist_split = self.mnist_train if split == 'train' else self.mnist_test
 
         return {
@@ -59,11 +60,11 @@ class MnistDataModule(LightningDataModule):
             for domain in self.domains
         }
 
-    def train_dataloader(self):
+    def train_dataloader(self) -> CombinedLoader:
         loaders = self.__get_dataloaders('train')
         return CombinedLoader(loaders, mode="max_size_cycle")
 
-    def test_dataloader(self):
+    def test_dataloader(self) -> CombinedLoader:
         loaders = self.__get_dataloaders('test')
         return CombinedLoader(loaders, mode="max_size_cycle")
     

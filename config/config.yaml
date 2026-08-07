@@ -21,12 +21,7 @@ global_workspace:
 training:
     optim:
         lr: 0.001
-        weight_decay: 1e-6
-        max_lr: 1e-3
-        start_lr: 1e-3
-        end_lr: 1e-5
-        pct_start: 0.03
 
-    max_steps: 300000
+    max_steps: 100
     devices: 1
     batch_size: 1024
