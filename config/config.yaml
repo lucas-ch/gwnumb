@@ -1,0 +1,32 @@
+global_workspace:
+    latent_dim: 10
+
+    loss_coefficients:
+        cycles: 1.0
+        contrastives: 0.01
+        demi_cycles: 1.0
+        translations: 1.0
+    encoders:
+        hidden_dim:
+            image: 256
+            digit: 256
+        n_layers: 2
+
+    decoders:
+        hidden_dim:
+            image: 256
+            digit: 256
+        n_layers: 2
+
+training:
+    optim:
+        lr: 0.001
+        weight_decay: 1e-6
+        max_lr: 1e-3
+        start_lr: 1e-3
+        end_lr: 1e-5
+        pct_start: 0.03
+
+    max_steps: 300000
+    devices: 1
+    batch_size: 1024
