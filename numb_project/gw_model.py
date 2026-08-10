@@ -4,9 +4,10 @@ from shimmer import ContrastiveLoss, GWLosses2Domains, GWModule, GlobalWorkspace
 from shimmer.modules.losses import GWLosses
 import torch
 from torch.optim import AdamW
+import torch.nn.functional as F
 
-from numb_project.domain_module import LoadedDomainConfig, load_domains
-
+from numb_project.domain_module import LoadedDomainConfig, OperationModule, load_domains
+import random
 
 class MyGlobalWorkspace(GlobalWorkspaceBase):
     def __init__(
@@ -15,8 +16,10 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         selection_mod: SelectionBase,
         loss_mod: GWLosses,
         optim_lr: float = 1e-3,
+        operation_mod = None
     ) -> None:
         super().__init__(gw_mod, selection_mod, loss_mod, optim_lr)
+        self.operation_module = operation_mod
 
     def configure_optimizers(self) -> dict[str, AdamW]:
         optimizer = AdamW(
@@ -27,8 +30,55 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         return {"optimizer": optimizer}
 
 class MyCustomGWLosses(GWLosses2Domains):
-    def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn) -> None:
+    def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn, operation_mod) -> None:
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
+        self.operation_mod = operation_mod
+
+    def compute_shift_loss(self, digit_one_hot: torch.Tensor, image: torch.Tensor, shift_value: int) -> torch.Tensor:
+        target_one_hot = torch.roll(digit_one_hot, shifts=shift_value, dims=1)
+
+        with torch.no_grad():
+            gw_input = self.gw_mod.gw_encoders["image"](image)
+            gw_target = self.gw_mod.gw_encoders["digit"](target_one_hot)
+
+        batch_size = digit_one_hot.shape[0]
+        task = torch.full(
+            (batch_size, 1),
+            fill_value=float(shift_value),
+            device=digit_one_hot.device,
+        )
+
+        gw_pred = self.operation_mod(gw_input, task)
+        return F.mse_loss(gw_pred, gw_target)
+
+    def compute_shift_cycle_loss(self, digit_one_hot: torch.Tensor):
+        with torch.no_grad():
+            gw_input = self.gw_mod.gw_encoders["digit"](digit_one_hot)
+
+        batch_size = digit_one_hot.shape[0]
+        shift = random.randrange(1,5)
+
+        add = torch.full(
+                    (batch_size, 1),
+                    fill_value=float(1),
+                    device=digit_one_hot.device,
+                )
+
+        sub = torch.full(
+                    (batch_size, 1),
+                    fill_value=float(-1),
+                    device=digit_one_hot.device,
+                )
+
+
+        gw_pred = gw_input
+        for i in range(shift):
+            gw_pred = self.operation_mod(gw_pred, add)
+
+        for i in range(shift):
+            gw_pred = self.operation_mod(gw_pred, sub)
+
+        return F.mse_loss(gw_pred, gw_input)
 
     def step(
         self,
@@ -43,8 +93,19 @@ class MyCustomGWLosses(GWLosses2Domains):
         metrics.update(self.cycle_loss(domain_latents, raw_data))
         metrics.update(self.translation_loss(domain_latents, raw_data))
         metrics.update(self.contrastive_loss(domain_latents))
+
+        representation_loss = combine_loss(metrics, self.loss_coefs)
+
+        digit_one_hot = domain_latents[frozenset({'digit', 'image'})]['digit']
+        image = domain_latents[frozenset({'digit', 'image'})]['image']
+
+        add_loss = self.compute_shift_loss(digit_one_hot, image, 1)
+        sub_loss = self.compute_shift_loss(digit_one_hot, image, -1)
+        operation_cycle = self.compute_shift_cycle_loss(digit_one_hot)
+
+        total_loss = representation_loss + 10*(add_loss + sub_loss + operation_cycle)
         
-        return LossOutput(combine_loss(metrics, self.loss_coefs), metrics)
+        return LossOutput(total_loss, metrics)
 
 
 def get_global_workspace_mods(
@@ -71,25 +132,29 @@ def get_global_workspace_mods(
         fusion_activation_fn=torch.tanh
     )
 
+    operation_mod = OperationModule(10, 1, 128)
+
     loss_mod = MyCustomGWLosses(
         gw_mod = gw_mod,
         selection_mod=selection_mod,
         domain_mods=domain_modules,
         loss_coefs=config["global_workspace"]["loss_coefficients"],
-        contrastive_fn=contrastive_fn
+        contrastive_fn=contrastive_fn,
+        operation_mod = operation_mod
     )
 
-    return gw_mod, selection_mod, loss_mod
+    return gw_mod, selection_mod, operation_mod, loss_mod
 
 
 def setup_global_workspace(config: dict[str, Any], domains_configs: list[LoadedDomainConfig]) -> MyGlobalWorkspace:
-    gw_mod, selection_mod, loss_mod = get_global_workspace_mods(config, domains_configs)
+    gw_mod, selection_mod, operation_mod, loss_mod = get_global_workspace_mods(config, domains_configs)
 
     global_workspace = MyGlobalWorkspace(
         gw_mod=gw_mod,
         selection_mod=selection_mod,
         loss_mod=loss_mod,
-        optim_lr=config["training"]["optim"]["lr"]
+        optim_lr=config["training"]["optim"]["lr"],
+        operation_mod= operation_mod
     )
 
     return global_workspace

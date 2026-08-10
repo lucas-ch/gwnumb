@@ -9,7 +9,7 @@ from torch.nn import Linear, Module
 import torch.nn.functional as F
 
 from numb_project.mnist_vae import VAE
-from numb_project.utils import LoadedDomainConfig, get_from_dict_or_val
+from numb_project.utils import get_from_dict_or_val
 from numb_project.constants import BASE, VAE_CHECKPOINT_FILE
 
 
@@ -70,6 +70,22 @@ class MNISTDomain(DomainModule):
     def compute_loss(self, pred, target, raw_target):
         return LossOutput(F.mse_loss(pred, target, reduction="mean"))
 
+class OperationModule(nn.Module):
+    def __init__(self, gw_size, task_size, hidden_size):
+        super().__init__()
+
+        self.transfo = nn.Sequential(
+            nn.Linear(gw_size + task_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, gw_size),
+        )
+
+    def forward(self, x, task):
+        combined = torch.cat([x, task], dim=1)
+        return self.transfo(combined)
+    
 class LoadedDomainConfig(BaseModel):
     checkpoint_path: Path = ""
     domain_type: str
