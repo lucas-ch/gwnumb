@@ -1,5 +1,3 @@
-
-
 from typing import Any
 
 from lightning import Trainer
@@ -43,7 +41,7 @@ def main() -> None:
     
     domain_configs = get_domains_config(['image', 'digit'])
 
-    training_objects = get_training_objects(config, domain_configs, 'test')
+    training_objects = get_training_objects(config, domain_configs, 'debug')
     training_objects['trainer'].fit(training_objects['global_workspace'], training_objects['data_module'])
 
 if __name__ == "__main__":

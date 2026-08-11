@@ -10,6 +10,7 @@ global_workspace:
         hidden_dim:
             image: 256
             digit: 256
+            operation: 256
         n_layers: 2
 
     decoders:

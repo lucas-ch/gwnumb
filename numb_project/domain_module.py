@@ -85,7 +85,23 @@ class OperationModule(nn.Module):
     def forward(self, x, task):
         combined = torch.cat([x, task], dim=1)
         return self.transfo(combined)
-    
+
+class AttentionModule(nn.Module):
+    def __init__(self, gw_size=10, output_size=3, hidden_size=128, temperature=0.1):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.memory_cell = nn.LSTMCell(input_size=gw_size, hidden_size=hidden_size)
+        self.output = nn.Linear(hidden_size, output_size)
+        self.temperature = temperature
+
+    def forward(self, x: torch.Tensor, hc: tuple[torch.Tensor, torch.Tensor]):
+        h, c = self.memory_cell(x, hc)
+        logits = self.output(h)
+
+        attention = torch.softmax(logits / self.temperature, dim=-1)
+
+        return attention, (h, c)
+
 class LoadedDomainConfig(BaseModel):
     checkpoint_path: Path = ""
     domain_type: str
