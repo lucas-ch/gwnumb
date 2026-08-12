@@ -49,7 +49,7 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         )
         return {"optimizer": optimizer}
 
-    def forward_chain(self, image, right_addend_onehot, digit_one_hot, chain_length=BASE*2):
+    def forward_chain(self, image, right_addend_onehot, digit_one_hot, chain_length=6):
         batch_size = image.shape[0]
         h0 = torch.zeros(batch_size, 128, device=DEVICE)
         c0 = torch.zeros(batch_size, 128, device=DEVICE)
@@ -90,7 +90,7 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
 
         return torch.stack(outputs, dim=1)
 
-    def generic_step(self, batch: RawDomainGroupsT, mode: ModelModeT, start_chain=0, end_chain=10):
+    def generic_step(self, batch: RawDomainGroupsT, mode: ModelModeT, start_chain=0, end_chain=3):
         domain_latents = self.encode_domains(batch)
         batch_size = groups_batch_size(domain_latents)
 

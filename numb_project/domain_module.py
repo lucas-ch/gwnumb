@@ -94,6 +94,13 @@ class AttentionModule(nn.Module):
         self.output = nn.Linear(hidden_size, output_size)
         self.temperature = temperature
 
+    def init_cell(self, batch_size:int, device: str):
+        h0 = torch.zeros(batch_size, self.hidden_size, device=device)
+        c0 = torch.zeros(batch_size, self.hidden_size, device=device)
+        hc = (h0, c0)
+
+        return hc
+
     def forward(self, x: torch.Tensor, hc: tuple[torch.Tensor, torch.Tensor]):
         h, c = self.memory_cell(x, hc)
         logits = self.output(h)
