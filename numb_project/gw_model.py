@@ -55,7 +55,6 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         c0 = torch.zeros(batch_size, 128, device=DEVICE)
         hc = (h0, c0)
         z = torch.zeros(batch_size, 10, device=image.device)
-        z[:, 0] = 1.0
         gw_state = self.gw_mod.gw_encoders["digit"](z)
 
 
@@ -63,27 +62,31 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
 
         for t in range(chain_length):
             attn_t, hc = self.attention_module(right_addend_onehot, hc)
-            a_perc, a_op, a_out = attn_t[:, 0:1], attn_t[:, 1:2], attn_t[:, 2:3]
+            a_perc = attn_t[:, 0].unsqueeze(1)
+            a_op = attn_t[:, 1].unsqueeze(1)
+            a_out = attn_t[:, 2].unsqueeze(1)
 
             if t == 0:
                 image_to_latent = self.encode_domain(image, "image")
                 perception_to_gw = self.gw_mod.gw_encoders["image"](image_to_latent)
-                a_addl_raw = torch.argmax(digit_one_hot, dim=1)
-                a_addr = torch.argmax(right_addend_onehot, dim=1)
 
                 decoded_digit = self.gw_mod.gw_decoders["digit"](perception_to_gw)
                 a_addl_decoded = torch.argmax(decoded_digit, dim=1)
             else:
-                perception_to_gw = 0.0
+                perception_to_gw = torch.zeros_like(right_addend_onehot)
 
             task = torch.ones(batch_size, 1, device=image.device)
 
-            a_gw_state = torch.argmax(self.gw_mod.gw_decoders["digit"](gw_state), dim = 1)
             op_to_gw = self.operation_module(gw_state, task)
-            a_digit_post_ope = torch.argmax(self.gw_mod.gw_decoders["digit"](op_to_gw), dim = 1)
 
             digit_pred = self.gw_mod.gw_decoders["digit"](gw_state)
             out_to_gw = self.gw_mod.gw_encoders["digit"](digit_pred)
+
+            a_addl = torch.argmax(digit_one_hot, dim=1)
+            a_addr = torch.argmax(right_addend_onehot, dim=1)
+            a_digit_post_ope = torch.argmax(self.gw_mod.gw_decoders["digit"](op_to_gw), dim = 1)
+            a_ground_truth = a_addl + a_addr
+            a_gw_state = torch.argmax(self.gw_mod.gw_decoders["digit"](gw_state), dim = 1)
 
             gw_state = a_perc * perception_to_gw + a_op * op_to_gw + a_out * out_to_gw
             outputs.append(digit_pred)
@@ -115,9 +118,9 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         return total_loss
 
     def on_train_epoch_start(self):
-        min_temp = 0.01
-        max_temp = 0.5
-        decay_epochs = 20
+        min_temp = 0.1
+        max_temp = 1.0
+        decay_epochs = 10
         progress = min(self.current_epoch / decay_epochs, 1.0)
 
         self.attention_module.temperature = max_temp * (min_temp / max_temp) ** progress
@@ -144,60 +147,33 @@ class MyCustomGWLosses(GWLosses2Domains):
         gw_pred = self.operation_mod(gw_input, task)
         return F.mse_loss(gw_pred, gw_target)
 
-    def compute_shift_cycle_loss(self, digit_one_hot: torch.Tensor):
-        with torch.no_grad():
-            gw_input = self.gw_mod.gw_encoders["digit"](digit_one_hot)
-
-        batch_size = digit_one_hot.shape[0]
-        shift = random.randrange(1,5)
-
-        add = torch.full(
-                    (batch_size, 1),
-                    fill_value=float(1),
-                    device=digit_one_hot.device,
-                )
-
-        sub = torch.full(
-                    (batch_size, 1),
-                    fill_value=float(-1),
-                    device=digit_one_hot.device,
-                )
-
-
-        gw_pred = gw_input
-        for i in range(shift):
-            gw_pred = self.operation_mod(gw_pred, add)
-
-        for i in range(shift):
-            gw_pred = self.operation_mod(gw_pred, sub)
-
-        return F.mse_loss(gw_pred, gw_input)        
-
     def compute_chain_loss(self, cumulative_preds: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         chain_length = cumulative_preds.size(1)
         losses = torch.zeros(chain_length, device=cumulative_preds.device)
         for i in range(chain_length):
             losses[i] = F.mse_loss(cumulative_preds[:, i, :], target)
-        return torch.mean(losses[1:]) + losses[-1]
+        return torch.mean(losses[1:])
 
     def step(self, raw_data, domain_latents, mode, cumulative_preds=None, target=None) -> LossOutput:
         metrics = {}
-        metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
-        metrics.update(self.cycle_loss(domain_latents, raw_data))
-        metrics.update(self.translation_loss(domain_latents, raw_data))
-        metrics.update(self.contrastive_loss(domain_latents))
-        representation_loss = combine_loss(metrics, self.loss_coefs)
+        total_loss = 0
 
-        digit_one_hot = domain_latents[frozenset({"digit", "image"})]["digit"]
-        image = domain_latents[frozenset({"digit", "image"})]["image"]
+        if False:
+            metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
+            metrics.update(self.cycle_loss(domain_latents, raw_data))
+            metrics.update(self.translation_loss(domain_latents, raw_data))
+            metrics.update(self.contrastive_loss(domain_latents))
+            representation_loss = combine_loss(metrics, self.loss_coefs)
 
-        add_loss = self.compute_shift_loss(digit_one_hot, image, 1)
-        sub_loss = self.compute_shift_loss(digit_one_hot, image, -1)
-        operation_cycle = self.compute_shift_cycle_loss(digit_one_hot)
+            digit_one_hot = domain_latents[frozenset({"digit", "image"})]["digit"]
+            image = domain_latents[frozenset({"digit", "image"})]["image"]
 
-        total_loss = representation_loss + 10 * (add_loss + sub_loss + operation_cycle)
+            add_loss = self.compute_shift_loss(digit_one_hot, image, 1)
+            sub_loss = self.compute_shift_loss(digit_one_hot, image, -1)
 
-        if cumulative_preds is not None and target is not None:
+            total_loss = representation_loss + add_loss + sub_loss
+
+        if cumulative_preds is not None and target is not None and True:
             chain_loss = self.compute_chain_loss(cumulative_preds, target)
             metrics["chain_loss"] = chain_loss
             total_loss = total_loss + chain_loss
@@ -256,5 +232,29 @@ def setup_global_workspace(config: dict[str, Any], domains_configs: list[LoadedD
         operation_mod= operation_mod,
         attention_mod=attention_mod
     )
+
+    return global_workspace
+
+def freeze_except_attention(model: MyGlobalWorkspace) -> None:
+    for param in model.parameters():
+        param.requires_grad = False
+
+    for param in model.attention_module.parameters():
+        param.requires_grad = True
+
+def load_pretrained_global_workspace(
+    config: dict[str, Any],
+    domains_configs: list[LoadedDomainConfig],
+    checkpoint_path: str,
+    device: str = "cuda",
+) -> MyGlobalWorkspace:
+    global_workspace = setup_global_workspace(config, domains_configs)
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
+    global_workspace.load_state_dict(state_dict)
+
+    freeze_except_attention(global_workspace)
+    global_workspace.to(device)
 
     return global_workspace

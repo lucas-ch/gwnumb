@@ -23,6 +23,6 @@ training:
     optim:
         lr: 0.001
 
-    max_steps: 100
+    max_steps: 1000
     devices: 1
     batch_size: 1024
