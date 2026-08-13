@@ -49,51 +49,48 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         )
         return {"optimizer": optimizer}
 
-    def forward_chain(self, image, right_addend_onehot, digit_one_hot, chain_length=6):
+    def forward_chain(self, image, right_addend_onehot, digit_one_hot, chain_length=20):
         batch_size = image.shape[0]
         h0 = torch.zeros(batch_size, 128, device=DEVICE)
         c0 = torch.zeros(batch_size, 128, device=DEVICE)
         hc = (h0, c0)
-        z = torch.zeros(batch_size, 10, device=image.device)
-        gw_state = self.gw_mod.gw_encoders["digit"](z)
 
+
+        image_to_latent = self.encode_domain(image, "image")
+        perception_to_gw = self.gw_mod.gw_encoders["image"](image_to_latent)
+        gw_state = perception_to_gw
 
         outputs = []
 
         for t in range(chain_length):
-            attn_t, hc = self.attention_module(right_addend_onehot, hc)
-            a_perc = attn_t[:, 0].unsqueeze(1)
-            a_op = attn_t[:, 1].unsqueeze(1)
-            a_out = attn_t[:, 2].unsqueeze(1)
+            attention_vecteur, hc = self.attention_module(right_addend_onehot, hc)
+            attention_perception = attention_vecteur[:, 0].unsqueeze(1)
+            attention_add = attention_vecteur[:, 1].unsqueeze(1)
+            attention_sub = attention_vecteur[:, 2].unsqueeze(1)
 
-            if t == 0:
-                image_to_latent = self.encode_domain(image, "image")
-                perception_to_gw = self.gw_mod.gw_encoders["image"](image_to_latent)
-
-                decoded_digit = self.gw_mod.gw_decoders["digit"](perception_to_gw)
-                a_addl_decoded = torch.argmax(decoded_digit, dim=1)
-            else:
-                perception_to_gw = torch.zeros_like(right_addend_onehot)
-
-            task = torch.ones(batch_size, 1, device=image.device)
-
-            op_to_gw = self.operation_module(gw_state, task)
-
-            digit_pred = self.gw_mod.gw_decoders["digit"](gw_state)
-            out_to_gw = self.gw_mod.gw_encoders["digit"](digit_pred)
+            task_add = torch.ones(batch_size, 1, device=image.device)
+            task_sub = torch.ones(batch_size, 1, device=image.device) * -1
+            add_to_gw = self.operation_module(gw_state, task_add)
+            sub_to_gw = self.operation_module(gw_state, task_sub)
 
             a_addl = torch.argmax(digit_one_hot, dim=1)
             a_addr = torch.argmax(right_addend_onehot, dim=1)
-            a_digit_post_ope = torch.argmax(self.gw_mod.gw_decoders["digit"](op_to_gw), dim = 1)
+            a_digit_post_add = torch.argmax(self.gw_mod.gw_decoders["digit"](add_to_gw), dim = 1)
+            a_digit_post_sub = torch.argmax(self.gw_mod.gw_decoders["digit"](sub_to_gw), dim = 1)
             a_ground_truth = a_addl + a_addr
             a_gw_state = torch.argmax(self.gw_mod.gw_decoders["digit"](gw_state), dim = 1)
 
-            gw_state = a_perc * perception_to_gw + a_op * op_to_gw + a_out * out_to_gw
+            gw_state = attention_perception * perception_to_gw + attention_add * add_to_gw + attention_sub * sub_to_gw
+
+            perception_to_gw = gw_state
+            digit_pred = self.gw_mod.gw_decoders["digit"](gw_state)
+
+
             outputs.append(digit_pred)
 
         return torch.stack(outputs, dim=1)
 
-    def generic_step(self, batch: RawDomainGroupsT, mode: ModelModeT, start_chain=0, end_chain=3):
+    def generic_step(self, batch: RawDomainGroupsT, mode: ModelModeT, start_chain=0, end_chain=10):
         domain_latents = self.encode_domains(batch)
         batch_size = groups_batch_size(domain_latents)
 
@@ -123,6 +120,9 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         decay_epochs = 10
         progress = min(self.current_epoch / decay_epochs, 1.0)
 
+        if self.current_epoch > 3:
+            self.attention_module.hard = True
+
         self.attention_module.temperature = max_temp * (min_temp / max_temp) ** progress
 
 class MyCustomGWLosses(GWLosses2Domains):
@@ -151,7 +151,8 @@ class MyCustomGWLosses(GWLosses2Domains):
         chain_length = cumulative_preds.size(1)
         losses = torch.zeros(chain_length, device=cumulative_preds.device)
         for i in range(chain_length):
-            losses[i] = F.mse_loss(cumulative_preds[:, i, :], target)
+            target_idx = torch.argmax(target, dim=1)
+            losses[i] = F.cross_entropy(cumulative_preds[:, i, :], target_idx)
         return torch.mean(losses[1:])
 
     def step(self, raw_data, domain_latents, mode, cumulative_preds=None, target=None) -> LossOutput:

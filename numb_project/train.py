@@ -54,10 +54,10 @@ def main() -> None:
         load_files=[CONFIG_FILE])[0]
     domain_configs = get_domains_config(['image', 'digit'])
 
-    checkpoint_path = "/home/lucas/gwnumb/checkpoints/numb/pretrain.ckpt"
+    checkpoint_path = "/home/lucas/gwnumb/checkpoints/numb/pretrain_ce.ckpt"
 
     training_objects = get_training_objects(
-        config, domain_configs, 'test', checkpoint_path=checkpoint_path
+        config, domain_configs, 'test_ce', checkpoint_path=checkpoint_path
     )
     training_objects['trainer'].fit(training_objects['global_workspace'], training_objects['data_module'])
 

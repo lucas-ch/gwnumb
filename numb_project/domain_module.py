@@ -39,7 +39,8 @@ class IdentityDomain(DomainModule):
         return self.decode(self.encode(x))
     
     def compute_loss(self, pred, target, raw_target):
-        return LossOutput(F.mse_loss(pred, target, reduction="mean"))
+        target_idx = torch.argmax(target, dim=1)
+        return LossOutput(F.cross_entropy(pred, target_idx, reduction="mean"))
 
 class MNISTDomain(DomainModule):
     def __init__(self, vae: VAE) -> None:
