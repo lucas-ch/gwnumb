@@ -49,48 +49,45 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         )
         return {"optimizer": optimizer}
 
-    def forward_chain(self, image, right_addend_onehot, digit_one_hot, chain_length=20):
+    def forward_chain(self, image, right_addend_onehot, digit_one_hot, chain_length=10):
         batch_size = image.shape[0]
-        h0 = torch.zeros(batch_size, 128, device=DEVICE)
-        c0 = torch.zeros(batch_size, 128, device=DEVICE)
+        h0 = torch.zeros(batch_size, 32, device=DEVICE)
+        c0 = torch.zeros(batch_size, 32, device=DEVICE)
         hc = (h0, c0)
 
-
         image_to_latent = self.encode_domain(image, "image")
-        perception_to_gw = self.gw_mod.gw_encoders["image"](image_to_latent)
-        gw_state = perception_to_gw
+        gw_state = self.gw_mod.gw_encoders["image"](image_to_latent)
+        task = torch.ones(batch_size, 1, device=image.device)
 
         outputs = []
+        a_roll_sequence = []
 
+        digit_pred = self.gw_mod.gw_decoders["digit"](gw_state)
+        outputs.append(digit_pred)
         for t in range(chain_length):
-            attention_vecteur, hc = self.attention_module(right_addend_onehot, hc)
-            attention_perception = attention_vecteur[:, 0].unsqueeze(1)
-            attention_add = attention_vecteur[:, 1].unsqueeze(1)
-            attention_sub = attention_vecteur[:, 2].unsqueeze(1)
+            step_scalar = torch.full((batch_size, 1), float(t) / chain_length, device=image.device)
+            a_roll, hc = self.attention_module(right_addend_onehot, hc, step_embedding=step_scalar)
+            a_roll_sequence.append(a_roll)
 
-            task_add = torch.ones(batch_size, 1, device=image.device)
-            task_sub = torch.ones(batch_size, 1, device=image.device) * -1
-            add_to_gw = self.operation_module(gw_state, task_add)
-            sub_to_gw = self.operation_module(gw_state, task_sub)
+            op_result = self.operation_module(gw_state, task)
 
             a_addl = torch.argmax(digit_one_hot, dim=1)
             a_addr = torch.argmax(right_addend_onehot, dim=1)
-            a_digit_post_add = torch.argmax(self.gw_mod.gw_decoders["digit"](add_to_gw), dim = 1)
-            a_digit_post_sub = torch.argmax(self.gw_mod.gw_decoders["digit"](sub_to_gw), dim = 1)
             a_ground_truth = a_addl + a_addr
             a_gw_state = torch.argmax(self.gw_mod.gw_decoders["digit"](gw_state), dim = 1)
 
-            gw_state = attention_perception * perception_to_gw + attention_add * add_to_gw + attention_sub * sub_to_gw
+            gw_state = a_roll * op_result + (1 - a_roll) * gw_state
 
-            perception_to_gw = gw_state
             digit_pred = self.gw_mod.gw_decoders["digit"](gw_state)
-
-
             outputs.append(digit_pred)
 
-        return torch.stack(outputs, dim=1)
+        cumulative_preds = torch.stack(outputs, dim=1)          # (batch, chain_length, base)
+        a_roll_sequence = torch.stack(a_roll_sequence, dim=1)    # (batch, chain_length, 1)
 
-    def generic_step(self, batch: RawDomainGroupsT, mode: ModelModeT, start_chain=0, end_chain=10):
+        return cumulative_preds, a_roll_sequence
+
+    def generic_step(self, batch: RawDomainGroupsT, mode: ModelModeT,
+                    start_chain=0, end_chain=10, chain_length=10):
         domain_latents = self.encode_domains(batch)
         batch_size = groups_batch_size(domain_latents)
 
@@ -98,30 +95,36 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         image = raw_group["image"]
         digit_one_hot = raw_group["digit"]
 
-        right_addend_onehot, target = make_chain_task(digit_one_hot, base=BASE, start_chain=start_chain, end_chain=end_chain)
-        cumulative_preds = self.forward_chain(image, right_addend_onehot, digit_one_hot)
+        right_addend_onehot, target = make_chain_task(
+            digit_one_hot, base=BASE, start_chain=start_chain, end_chain=end_chain
+        )
+        cumulative_preds, a_roll_sequence = self.forward_chain(
+            image, right_addend_onehot, digit_one_hot, chain_length=chain_length
+        )
+
+        left_digit_idx = digit_one_hot.argmax(dim=1)
+        right_addend_value = right_addend_onehot.argmax(dim=1)
 
         loss_output = self.loss_mod.step(
             batch, domain_latents, mode,
             cumulative_preds=cumulative_preds,
+            a_roll_sequence=a_roll_sequence,
+            left_digit_idx=left_digit_idx,
             target=target,
+            right_addend_value=right_addend_value,
+            base=BASE,
         )
 
         for name, metric in loss_output.all.items():
             self.log(f"{mode}/{name}", metric, batch_size=batch_size, add_dataloader_idx=False)
 
-        total_loss = loss_output.loss
-
-        return total_loss
+        return loss_output.loss
 
     def on_train_epoch_start(self):
         min_temp = 0.1
         max_temp = 1.0
-        decay_epochs = 10
+        decay_epochs = 5
         progress = min(self.current_epoch / decay_epochs, 1.0)
-
-        if self.current_epoch > 3:
-            self.attention_module.hard = True
 
         self.attention_module.temperature = max_temp * (min_temp / max_temp) ** progress
 
@@ -147,17 +150,35 @@ class MyCustomGWLosses(GWLosses2Domains):
         gw_pred = self.operation_mod(gw_input, task)
         return F.mse_loss(gw_pred, gw_target)
 
-    def compute_chain_loss(self, cumulative_preds: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        chain_length = cumulative_preds.size(1)
-        losses = torch.zeros(chain_length, device=cumulative_preds.device)
-        for i in range(chain_length):
-            target_idx = torch.argmax(target, dim=1)
-            losses[i] = F.cross_entropy(cumulative_preds[:, i, :], target_idx)
-        return torch.mean(losses[1:])
+    def compute_halting_loss(
+        self, a_roll_sequence: torch.Tensor, right_addend_value: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Supervise le choix roll/pas-roll à chaque pas.
+        a_roll_sequence: (batch, chain_length, 1)
+        right_addend_value: (batch,) -- nombre de +1 attendus
+        Cible : rouler (1) tant que t < right_addend_value, sinon ne pas rouler (0).
+        """
+        batch_size, chain_length, _ = a_roll_sequence.shape
+        device = a_roll_sequence.device
 
-    def step(self, raw_data, domain_latents, mode, cumulative_preds=None, target=None) -> LossOutput:
-        metrics = {}
+        t_range = torch.arange(chain_length, device=device).unsqueeze(0)
+        target = (t_range < right_addend_value.unsqueeze(1)).float()
+        target = target.unsqueeze(-1)
+
+        return F.binary_cross_entropy(a_roll_sequence, target)
+
+    def compute_final_prediction_loss(
+        self, cumulative_preds: torch.Tensor, target_one_hot: torch.Tensor
+    ) -> torch.Tensor:
+        """Supervise uniquement la prédiction au dernier pas, contre la cible finale (one-hot)."""
+        return F.mse_loss(cumulative_preds[:, -1, :], target_one_hot)
+
+    def step(self, raw_data, domain_latents, mode, cumulative_preds=None,
+            a_roll_sequence=None, left_digit_idx=None, target=None,
+            right_addend_value=None, base=BASE):
         total_loss = 0
+        metrics = {}
 
         if False:
             metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
@@ -171,13 +192,18 @@ class MyCustomGWLosses(GWLosses2Domains):
 
             add_loss = self.compute_shift_loss(digit_one_hot, image, 1)
             sub_loss = self.compute_shift_loss(digit_one_hot, image, -1)
+            operation_cycle = self.compute_shift_cycle_loss(digit_one_hot)
 
-            total_loss = representation_loss + add_loss + sub_loss
+            total_loss = representation_loss + 10 * (add_loss + sub_loss + operation_cycle)
 
-        if cumulative_preds is not None and target is not None and True:
-            chain_loss = self.compute_chain_loss(cumulative_preds, target)
-            metrics["chain_loss"] = chain_loss
-            total_loss = total_loss + chain_loss
+        if cumulative_preds is not None:
+            halting_loss = self.compute_halting_loss(a_roll_sequence, right_addend_value)
+            final_loss = self.compute_final_prediction_loss(cumulative_preds, target)  # one-hot, pas idx
+
+            metrics["halting_loss"] = halting_loss
+            metrics["final_loss"] = final_loss
+
+            total_loss = total_loss + halting_loss + final_loss
 
         return LossOutput(total_loss, metrics)
 
@@ -207,7 +233,7 @@ def get_global_workspace_mods(
     )
 
     operation_mod = OperationModule(gw_size, 1, config["global_workspace"]["encoders"]["hidden_dim"]["operation"])
-    attention_mod = AttentionModule()
+    attention_mod = AttentionModule(output_size=2)
 
     loss_mod = MyCustomGWLosses(
         gw_mod = gw_mod,

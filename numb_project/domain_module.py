@@ -39,8 +39,7 @@ class IdentityDomain(DomainModule):
         return self.decode(self.encode(x))
     
     def compute_loss(self, pred, target, raw_target):
-        target_idx = torch.argmax(target, dim=1)
-        return LossOutput(F.cross_entropy(pred, target_idx, reduction="mean"))
+        return LossOutput(F.mse_loss(pred, target, reduction="mean"))
 
 class MNISTDomain(DomainModule):
     def __init__(self, vae: VAE) -> None:
@@ -88,27 +87,32 @@ class OperationModule(nn.Module):
         return self.transfo(combined)
 
 class AttentionModule(nn.Module):
-    def __init__(self, gw_size=10, output_size=3, hidden_size=128, temperature=0.1):
+    def __init__(self, gw_size=10, output_size=2, hidden_size=32, temperature=1.0):
         super().__init__()
         self.hidden_size = hidden_size
-        self.memory_cell = nn.LSTMCell(input_size=gw_size, hidden_size=hidden_size)
+        self.memory_cell = nn.LSTMCell(input_size=gw_size + 1, hidden_size=hidden_size)
         self.output = nn.Linear(hidden_size, output_size)
         self.temperature = temperature
+        self.hard = True
 
-    def init_cell(self, batch_size:int, device: str):
+    def init_cell(self, batch_size: int, device: str):
         h0 = torch.zeros(batch_size, self.hidden_size, device=device)
         c0 = torch.zeros(batch_size, self.hidden_size, device=device)
-        hc = (h0, c0)
+        return (h0, c0)
 
-        return hc
+    def forward(self, x: torch.Tensor, hc: tuple[torch.Tensor, torch.Tensor],
+                step_embedding: torch.Tensor | None = None):
+        if step_embedding is not None:
+            x = torch.cat([x, step_embedding], dim=-1)
 
-    def forward(self, x: torch.Tensor, hc: tuple[torch.Tensor, torch.Tensor]):
         h, c = self.memory_cell(x, hc)
-        logits = self.output(h)
+        logits = self.output(h)  # (batch, 2) : [ne_pas_roll, roll]
 
-        attention = torch.softmax(logits / self.temperature, dim=-1)
+        choice = torch.softmax(logits / self.temperature, dim=-1)
 
-        return attention, (h, c)
+        a_roll = choice[:, 1:2]  # (batch, 1)
+
+        return a_roll, (h, c)
 
 class LoadedDomainConfig(BaseModel):
     checkpoint_path: Path = ""
