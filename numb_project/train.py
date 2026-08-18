@@ -17,11 +17,6 @@ def get_training_objects(
     training_name: str,
     checkpoint_path: str | None = None,
 ) -> dict[str, Any]:
-    config = load_config_files(
-        CONFIG_FOLDER,
-        use_cli=False,
-        load_files=[CONFIG_FILE])[0]
-
     data_module = MnistDataModule(config['training']['batch_size'])
 
     if checkpoint_path is not None:
@@ -48,16 +43,24 @@ def get_training_objects(
 
 
 def main() -> None:
+    run_name = 'train'
+    checkpoint_path = "/home/lucasc/Projects/gwnumb/checkpoints/numb/pretrain.ckpt"
+
     config = load_config_files(
         CONFIG_FOLDER,
         use_cli=False,
         load_files=[CONFIG_FILE])[0]
     domain_configs = get_domains_config(['image', 'digit'])
 
-    checkpoint_path = "/home/lucas/gwnumb/checkpoints/numb/pretrain_ce.ckpt"
+    if checkpoint_path is None:
+        config['global_workspace']['loss_coefficients']['task_loss'] = 0.0
+    else:
+        config['global_workspace']['loss_coefficients']['add_loss'] = 0.0
+        config['global_workspace']['loss_coefficients']['sub_loss'] = 0.0
+        config['global_workspace']['loss_coefficients']['representation_loss'] = 0.0
 
     training_objects = get_training_objects(
-        config, domain_configs, 'test_ce', checkpoint_path=checkpoint_path
+        config, domain_configs, run_name, checkpoint_path=checkpoint_path
     )
     training_objects['trainer'].fit(training_objects['global_workspace'], training_objects['data_module'])
 

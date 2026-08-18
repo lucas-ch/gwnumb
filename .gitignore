@@ -1,5 +1,6 @@
 data/
 .vscode/
+.claude/
 lightning_logs/
 checkpoints/numb/
 
