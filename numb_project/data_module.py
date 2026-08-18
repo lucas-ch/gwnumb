@@ -5,9 +5,17 @@ from lightning.pytorch.utilities import CombinedLoader
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
+from torchvision.transforms import functional as TF
 import torch.nn.functional as F
 
 from numb_project.constants import BASE
+
+
+def rotate_item(item: dict[str, Any], degrees: float) -> dict[str, Any]:
+    rotated = dict(item)
+    if "image" in rotated:
+        rotated["image"] = TF.rotate(rotated["image"], degrees)
+    return rotated
 
 class MnistDataset(Dataset):
     def __init__(self, mnist_dataset: datasets.MNIST, domain: list[str]) -> None:

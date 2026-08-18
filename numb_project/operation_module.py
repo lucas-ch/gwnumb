@@ -1,8 +1,10 @@
 
-from shimmer import GWModuleBase, LatentsDomainGroupsT, LossOutput
+from shimmer import GWModuleBase, LatentsDomainGroupsT, LossOutput, RawDomainGroupsT
 from torch import nn
 import torch
 import torch.nn.functional as F
+
+from numb_project.data_module import rotate_item
 
 
 class UnitaryOperationModule(nn.Module):
@@ -56,12 +58,9 @@ class ChainOperationModule(nn.Module):
         outputs = []
         roll_sequence = []
         for t in range(self.chain_length):
-            add_to_gw = self.operation_module['add'](gw_state)
-            sub_to_gw = self.operation_module['sub'](gw_state)
-
             operations_results = {
-                'add_to_gw': add_to_gw,
-                'sub_to_gw': sub_to_gw
+                f'{name}_to_gw': operation(gw_state)
+                for name, operation in self.operation_module.items()
             }
 
             gw_state, roll = self.operation_selection_module.update_gw_state(gw_state, task, operations_results)
@@ -183,16 +182,18 @@ class OperationSelectionModule(nn.Module):
         operations_results: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         operation_selection_vector, self.hc = self(task, self.hc)
+        assert operation_selection_vector.shape[1] == 1 + len(operations_results), (
+            "operation_selection_vector must carry one weight per operation plus 'stale'"
+        )
+
         operation_selection_stale = operation_selection_vector[:, 0].unsqueeze(1)
-        operation_selection_add = operation_selection_vector[:, 1].unsqueeze(1)
-        operation_selection_sub = operation_selection_vector[:, 2].unsqueeze(1)
+        new_gw_state = operation_selection_stale * gw_state
 
-        add_to_gw = operations_results['add_to_gw']
-        sub_to_gw = operations_results['sub_to_gw']
-        
-        gw_state = operation_selection_stale * gw_state + operation_selection_add * add_to_gw + operation_selection_sub * sub_to_gw
+        for i, operation_result in enumerate(operations_results.values(), start=1):
+            operation_selection_weight = operation_selection_vector[:, i].unsqueeze(1)
+            new_gw_state = new_gw_state + operation_selection_weight * operation_result
 
-        return gw_state, operation_selection_vector
+        return new_gw_state, operation_selection_vector
 
 
 def get_input_target_shift_loss(
@@ -207,6 +208,37 @@ def get_input_target_shift_loss(
             target = gw_mod.gw_encoders["digit"](target_one_hot)
 
         return input, target
+
+def get_input_target_rotation_loss(
+    gw_mod: GWModuleBase, raw_data: RawDomainGroupsT, degrees: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+        # La rotation doit s'appliquer sur l'image brute (pixels) et non sur le
+        # latent du domaine "image" (ex : mu d'un VAE), qui n'a pas de structure
+        # spatiale.
+        image = raw_data[frozenset({"digit", "image"})]['image']
+        rotated_image = rotate_item({"image": image}, degrees)["image"]
+
+        with torch.no_grad():
+            image_latent = gw_mod.domain_mods["image"].encode(image)
+            rotated_latent = gw_mod.domain_mods["image"].encode(rotated_image)
+            input = gw_mod.gw_encoders["image"](image_latent)
+            target = gw_mod.gw_encoders["image"](rotated_latent)
+
+        return input, target
+
+class RotateOperationModule(UnitaryOperationModule):
+    def __init__(self, input_size: int, hidden_size: int, output_size: int):
+        super().__init__(input_size, hidden_size, output_size)
+
+    def loss(
+        self,
+        gw_mod: GWModuleBase,
+        raw_data: RawDomainGroupsT,
+    ) -> torch.Tensor:
+        input, target = get_input_target_rotation_loss(gw_mod, raw_data, 10)
+        pred = self(input)
+
+        return F.mse_loss(pred, target)
 
 class AddOperationModule(UnitaryOperationModule):
     def __init__(self, input_size: int, hidden_size: int, output_size: int):

@@ -20,6 +20,7 @@ def get_config(checkpoint_path: str | None) -> dict[str, Any]:
     else:
         config['global_workspace']['loss_coefficients']['add_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['sub_loss'] = 0.0
+        config['global_workspace']['loss_coefficients']['rotate_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['representation_loss'] = 0.0
 
     return config
@@ -56,7 +57,7 @@ def get_training_objects(
 
 def main() -> None:
     run_name = 'train'
-    checkpoint_path = "/home/lucasc/Projects/gwnumb/checkpoints/numb/pretrain.ckpt"
+    checkpoint_path = None
 
     domain_configs = get_domains_config(['image', 'digit'])
     config = get_config(checkpoint_path)

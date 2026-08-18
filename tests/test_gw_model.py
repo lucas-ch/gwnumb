@@ -2,8 +2,9 @@ from typing import Any
 
 import pytest
 import torch
-from shimmer import ContrastiveLoss, GWDecoder, GWEncoder, GWModule, SingleDomainSelection
+from shimmer import ContrastiveLoss, DomainModule, GWDecoder, GWEncoder, GWModule, LossOutput, SingleDomainSelection
 from torch import nn
+import torch.nn.functional as F
 
 from numb_project.constants import BASE
 from numb_project.domain_module import IdentityDomain, LoadedDomainConfig
@@ -15,13 +16,39 @@ from numb_project.gw_model import (
     load_pretrained_global_workspace,
     setup_global_workspace,
 )
-from numb_project.operation_module import AddOperationModule, ChainOperationModule, OperationSelectionModule, SubOperationModule
+from numb_project.operation_module import AddOperationModule, ChainOperationModule, OperationSelectionModule, RotateOperationModule, SubOperationModule
 
 GW_SIZE = BASE  # OperationSelectionModule's LSTMCell expects task one-hots of width BASE as its GW-sized input.
-IMAGE_DIM = 4
+IMAGE_SHAPE = (1, 4, 4)  # spatial shape so RotateOperationModule can rotate it like a real image.
+IMAGE_DIM = IMAGE_SHAPE[0] * IMAGE_SHAPE[1] * IMAGE_SHAPE[2]
 HIDDEN_DIM = 8
 CHAIN_LENGTH = 2
 BATCH_SIZE = 3
+
+
+class SpatialIdentityDomain(DomainModule):
+    """Identity domain module whose latent is the flattened image, so it can
+    stand in for a real image domain (encode/decode round-trip a spatial
+    tensor) without needing a pretrained VAE checkpoint."""
+
+    def __init__(self, shape: tuple[int, int, int]) -> None:
+        super().__init__(shape[0] * shape[1] * shape[2])
+        self.shape = shape
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(x.shape[0], -1)
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        return z.reshape(z.shape[0], *self.shape)
+
+    def transform(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.decode(self.encode(x))
+
+    def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, raw_target: Any) -> LossOutput:
+        return LossOutput(F.mse_loss(pred, target, reduction="mean"))
 
 REPRESENTATION_LOSS_COEFS = {
     "demi_cycles": 1.0,
@@ -33,6 +60,7 @@ LOSS_COEFS = {
     "representation_loss": 1.0,
     "add_loss": 1.0,
     "sub_loss": 1.0,
+    "rotate_loss": 1.0,
     "task_loss": 1.0,
 }
 
@@ -55,7 +83,7 @@ def make_workspace() -> tuple[MyGlobalWorkspace, dict]:
     """Builds a minimal but fully-wired MyGlobalWorkspace with 'image'/'digit'
     domains, using IdentityDomain for both so the graph doesn't depend on a
     pretrained VAE checkpoint."""
-    domain_modules = {"image": IdentityDomain(IMAGE_DIM), "digit": IdentityDomain(BASE)}
+    domain_modules = {"image": SpatialIdentityDomain(IMAGE_SHAPE), "digit": IdentityDomain(BASE)}
     gw_encoders = {
         "image": GWEncoder(IMAGE_DIM, HIDDEN_DIM, GW_SIZE, 1),
         "digit": GWEncoder(BASE, HIDDEN_DIM, GW_SIZE, 1),
@@ -71,9 +99,10 @@ def make_workspace() -> tuple[MyGlobalWorkspace, dict]:
     operation_mod = nn.ModuleDict({
         "add": AddOperationModule(GW_SIZE, HIDDEN_DIM, GW_SIZE),
         "sub": SubOperationModule(GW_SIZE, HIDDEN_DIM, GW_SIZE),
+        "rotate": RotateOperationModule(GW_SIZE, HIDDEN_DIM, GW_SIZE),
     })
     operation_selection_mod = OperationSelectionModule(
-        input_size=GW_SIZE, output_size=3, hidden_size=HIDDEN_DIM, batch_size=BATCH_SIZE, device="cpu"
+        input_size=GW_SIZE, output_size=1 + len(operation_mod), hidden_size=HIDDEN_DIM, batch_size=BATCH_SIZE, device="cpu"
     )
     task_mod = ChainOperationModule(
         CHAIN_LENGTH, 0, 9, BASE, gw_mod, operation_selection_mod, operation_mod
@@ -101,7 +130,7 @@ def make_workspace() -> tuple[MyGlobalWorkspace, dict]:
         task_mod=task_mod,
     )
 
-    image = torch.randn(BATCH_SIZE, IMAGE_DIM)
+    image = torch.randn(BATCH_SIZE, *IMAGE_SHAPE)
     digit = nn.functional.one_hot(torch.randint(0, BASE, (BATCH_SIZE,)), num_classes=BASE).float()
     batch = {
         frozenset(["image"]): {"image": image},
@@ -212,7 +241,7 @@ class TestModuleFunctions:
 
         assert isinstance(gw_mod, GWModule)
         assert isinstance(selection_mod, SingleDomainSelection)
-        assert set(operation_mod.keys()) == {"add", "sub"}
+        assert set(operation_mod.keys()) == {"add", "sub", "rotate"}
         assert isinstance(operation_selection_mod, OperationSelectionModule)
         assert isinstance(task_mod, ChainOperationModule)
         assert isinstance(loss_mod, MyCustomGWLosses)

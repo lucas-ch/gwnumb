@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from numb_project.constants import BASE, DEVICE
 from numb_project.domain_module import LoadedDomainConfig, load_domains
-from numb_project.operation_module import SubOperationModule, AddOperationModule, ChainOperationModule, OperationSelectionModule
+from numb_project.operation_module import SubOperationModule, AddOperationModule, RotateOperationModule, ChainOperationModule, OperationSelectionModule
 
 class MyGlobalWorkspace(GlobalWorkspaceBase):
     def __init__(
@@ -118,11 +118,12 @@ class MyCustomGWLosses(GWLosses2Domains):
         representation_loss, metrics = self.compute_representation_loss(raw_data, domain_latents)
         add_loss = self.operation_mod["add"].loss(self.gw_mod, domain_latents)
         sub_loss = self.operation_mod["sub"].loss(self.gw_mod, domain_latents)
+        rotate_loss = self.operation_mod["rotate"].loss(self.gw_mod, raw_data)
         task_loss_output = self.task_mod.loss(task_predictions, task_targets, roll_sequence, right_addend_value)
         metrics.update(task_loss_output.metrics)
         metrics["task_loss"] = task_loss_output.loss
 
-        total_loss = loss_config['representation_loss']*representation_loss + loss_config['add_loss']*add_loss + loss_config['sub_loss']*sub_loss + loss_config['task_loss']*task_loss_output.loss
+        total_loss = loss_config['representation_loss']*representation_loss + loss_config['add_loss']*add_loss + loss_config['sub_loss']*sub_loss + loss_config['rotate_loss']*rotate_loss + loss_config['task_loss']*task_loss_output.loss
 
         return LossOutput(total_loss, metrics)
 
@@ -153,13 +154,15 @@ def get_global_workspace_mods(
 
     operation_add_mod = AddOperationModule(gw_size, config["global_workspace"]["encoders"]["hidden_dim"]["operation"], gw_size)
     operation_sub_mod = SubOperationModule(gw_size, config["global_workspace"]["encoders"]["hidden_dim"]["operation"], gw_size)
+    operation_rotate_mod = RotateOperationModule(gw_size, config["global_workspace"]["encoders"]["hidden_dim"]["operation"], gw_size)
 
     operation_mod = nn.ModuleDict({
         "add": operation_add_mod,
-        "sub": operation_sub_mod
+        "sub": operation_sub_mod,
+        "rotate": operation_rotate_mod
     })
 
-    operation_selection_mod = OperationSelectionModule(input_size=gw_size, output_size=3, hidden_size=128, batch_size=batch_size, device=DEVICE)
+    operation_selection_mod = OperationSelectionModule(input_size=gw_size, output_size=1 + len(operation_mod), hidden_size=128, batch_size=batch_size, device=DEVICE)
 
     task_mod = ChainOperationModule(20, 0, 9, BASE, gw_mod, operation_selection_mod, operation_mod)
 
