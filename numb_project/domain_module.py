@@ -14,7 +14,7 @@ from numb_project.constants import BASE, VAE_CHECKPOINT_FILE
 
 
 class IdentityDomain(DomainModule):
-    def __init__(self, size) -> None:
+    def __init__(self, size: int) -> None:
         super().__init__(size)
 
         self.size = size
@@ -38,7 +38,7 @@ class IdentityDomain(DomainModule):
     def forward(self, x: Sequence[torch.Tensor]) -> list[torch.Tensor]:
         return self.decode(self.encode(x))
     
-    def compute_loss(self, pred, target, raw_target):
+    def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, raw_target: Any) -> LossOutput:
         return LossOutput(F.mse_loss(pred, target, reduction="mean"))
 
 class MNISTDomain(DomainModule):
@@ -67,15 +67,15 @@ class MNISTDomain(DomainModule):
     def forward(self, x: Sequence[torch.Tensor]) -> list[torch.Tensor]:  # type: ignore
         return self.decode(self.encode(x))
 
-    def compute_loss(self, pred, target, raw_target):
+    def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, raw_target: Any) -> LossOutput:
         return LossOutput(F.mse_loss(pred, target, reduction="mean"))
 
 class LoadedDomainConfig(BaseModel):
-    checkpoint_path: Path = ""
+    checkpoint_path: Path = Path("")
     domain_type: str
     args: Mapping[str, Any] = {}
 
-def get_domains_config(domains: list[str]):
+def get_domains_config(domains: list[str]) -> list[LoadedDomainConfig]:
     domains_config = []
     if 'image' in domains:
         domains_config.append(LoadedDomainConfig(domain_type="image", checkpoint_path=VAE_CHECKPOINT_FILE))

@@ -1,6 +1,6 @@
-from typing import Any
+from typing import Any, Callable, Mapping
 
-from shimmer import ContrastiveLoss, GWLosses2Domains, GWModule, GlobalWorkspaceBase, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
+from shimmer import ContrastiveLoss, DomainModule, GWLosses2Domains, GWModule, GlobalWorkspaceBase, LatentsDomainGroupsT, LossCoefs, LossOutput, ModelModeT, RawDomainGroupT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
 from shimmer.modules.losses import GWLosses
 import torch
 from torch import nn
@@ -17,10 +17,10 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         gw_mod: GWModule,
         selection_mod: SelectionBase,
         loss_mod: GWLosses,
+        operation_mod: nn.ModuleDict,
+        operation_selection_mod: OperationSelectionModule,
+        task_mod: ChainOperationModule,
         optim_lr: float = 1e-3,
-        operation_mod = None,
-        operation_selection_mod = None,
-        task_mod=None
     ) -> None:
         super().__init__(gw_mod, selection_mod, loss_mod, optim_lr)
         self.operation_module = operation_mod
@@ -35,14 +35,18 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         )
         return {"optimizer": optimizer}
 
-    def input_to_gw(self, raw_group):
+    def input_to_gw(self, raw_group: RawDomainGroupT) -> torch.Tensor:
         image = raw_group["image"]
         image_to_latent = self.encode_domain(image, "image")
         gw_state = self.gw_mod.gw_encoders["image"](image_to_latent)
 
         return gw_state
 
-    def generic_step(self, batch: RawDomainGroupsT, mode: ModelModeT, start_chain=0, end_chain=10):
+    def generic_step(
+        self,
+        batch: RawDomainGroupsT,
+        mode: ModelModeT,
+    ) -> torch.Tensor:
         domain_latents = self.encode_domains(batch)
         raw_group = batch[frozenset({"digit", "image"})]
                 
@@ -61,7 +65,7 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
 
         return loss_output.loss
 
-    def on_train_epoch_start(self):
+    def on_train_epoch_start(self) -> None:
         min_temp = 0.1
         max_temp = 1.0
         decay_epochs = 10
@@ -70,13 +74,26 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         self.operation_selection_module.temperature = max_temp * (min_temp / max_temp) ** progress
 
 class MyCustomGWLosses(GWLosses2Domains):
-    def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, representation_loss_coefs, contrastive_fn, operation_mod, operation_selection_mod, task_mod) -> None:
+    def __init__(
+        self,
+        gw_mod: GWModule,
+        selection_mod: SelectionBase,
+        domain_mods: dict[str, DomainModule],
+        loss_coefs: LossCoefs | Mapping[str, float],
+        representation_loss_coefs: LossCoefs | Mapping[str, float],
+        contrastive_fn: Callable[[torch.Tensor, torch.Tensor], LossOutput],
+        operation_mod: nn.ModuleDict,
+        operation_selection_mod: OperationSelectionModule,
+        task_mod: ChainOperationModule,
+    ) -> None:
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.operation_mod = operation_mod
         self.task_mod = task_mod
         self.representation_loss_coefs = representation_loss_coefs
 
-    def compute_representation_loss(self, raw_data, domain_latents):
+    def compute_representation_loss(
+        self, raw_data: RawDomainGroupsT, domain_latents: LatentsDomainGroupsT
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         metrics = {}
         metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
         metrics.update(self.cycle_loss(domain_latents, raw_data))
@@ -86,7 +103,16 @@ class MyCustomGWLosses(GWLosses2Domains):
 
         return representation_loss, metrics
 
-    def step(self, raw_data, domain_latents, mode, task_predictions, task_targets, roll_sequence, right_addend_value) -> LossOutput:
+    def step(
+        self,
+        raw_data: RawDomainGroupsT,
+        domain_latents: LatentsDomainGroupsT,
+        mode: ModelModeT,
+        task_predictions: torch.Tensor,
+        task_targets: torch.Tensor,
+        roll_sequence: torch.Tensor,
+        right_addend_value: torch.Tensor,
+    ) -> LossOutput:
         loss_config = self.loss_coefs
 
         representation_loss, metrics = self.compute_representation_loss(raw_data, domain_latents)
@@ -103,7 +129,7 @@ class MyCustomGWLosses(GWLosses2Domains):
 def get_global_workspace_mods(
         config: dict[str, Any],
         domains_configs: list[LoadedDomainConfig],
-        ) -> tuple[GWModule, SingleDomainSelection, MyCustomGWLosses]:
+        ) -> tuple[GWModule, SingleDomainSelection, nn.ModuleDict, OperationSelectionModule, ChainOperationModule, MyCustomGWLosses]:
     selection_mod = SingleDomainSelection()
     contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
     gw_size = config["global_workspace"]["latent_dim"]

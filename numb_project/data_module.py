@@ -30,7 +30,7 @@ class MnistDataset(Dataset):
         return {key: available[key] for key in self.domain}
 
 class MnistDataModule(LightningDataModule):
-    def __init__(self, batch_size) -> None:
+    def __init__(self, batch_size: int) -> None:
         super().__init__()
 
         self.batch_size = batch_size
