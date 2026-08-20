@@ -20,7 +20,8 @@ def get_config(checkpoint_path: str | None) -> dict[str, Any]:
     else:
         config['global_workspace']['loss_coefficients']['add_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['sub_loss'] = 0.0
-        config['global_workspace']['loss_coefficients']['rotate_loss'] = 0.0
+        config['global_workspace']['loss_coefficients']['rotate_pixel_loss'] = 0.0
+        config['global_workspace']['loss_coefficients']['rotate_gw_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['representation_loss'] = 0.0
 
     return config
@@ -42,6 +43,7 @@ def get_training_objects(
 
     checkpoint_callback = ModelCheckpoint(dirpath=GW_CHECKPOINT_FOLDER, filename=training_name)
     trainer = Trainer(
+        max_steps=config['training']['max_steps'],
         log_every_n_steps=1,
         check_val_every_n_epoch=1,
         callbacks=[checkpoint_callback],
@@ -56,7 +58,7 @@ def get_training_objects(
     }
 
 def main() -> None:
-    run_name = 'train'
+    run_name = 'pretrain'
     checkpoint_path = None
 
     domain_configs = get_domains_config(['image', 'digit'])

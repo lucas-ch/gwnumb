@@ -8,9 +8,13 @@ global_workspace:
         translations: 1.0
     loss_coefficients:
         representation_loss: 1.0
+        representation_loss_rotated: 0.2
         add_loss: 1.0
         sub_loss: 1.0
-        rotate_loss: 1.0
+        rotate_pixel_loss: 1.0
+        rotate_pixel_loss_rotated: 0.2
+        rotate_gw_loss: 1.0
+        rotate_gw_loss_rotated: 0.2
         task_loss: 1.0
     encoders:
         hidden_dim:
@@ -18,6 +22,19 @@ global_workspace:
             digit: 256
             operation: 256
         n_layers: 2
+
+    # Rotation apprise pour un angle fixe (cf operation_rotation_module.py),
+    # une variante par espace, pour comparer laquelle apprend le mieux :
+    #  - pixel : directement sur l'image (CNN), latent_dim = largeur du goulot
+    #    d'étranglement entre l'encodeur et le décodeur convolutifs.
+    #  - gw    : directement dans l'espace du global workspace (MLP), avec
+    #    hidden_size = largeur des couches denses et latent_dim = goulot.
+    rotation_operations:
+        pixel:
+            latent_dim: 64
+        gw:
+            hidden_size: 64
+            latent_dim: 32
 
     decoders:
         hidden_dim:
@@ -31,4 +48,4 @@ training:
 
     max_steps: 1000
     devices: 1
-    batch_size: 1024
+    batch_size: 512

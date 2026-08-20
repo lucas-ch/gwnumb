@@ -6,7 +6,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
-LATENT_DIM = 12
+LATENT_DIM = 16
 
 class Encoder(nn.Module):
     def __init__(self, latent_dim=LATENT_DIM):
@@ -99,7 +99,10 @@ class VAE(LightningModule):
 
 
 def main():
-    transform = transforms.ToTensor()  # normalise déjà dans [0, 1]
+    transform = transforms.Compose([
+        transforms.RandomRotation(degrees=180, fill=0),
+        transforms.ToTensor(),  # normalise déjà dans [0, 1]
+    ])
 
     train_dataset = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
     val_dataset = datasets.MNIST(root="./data", train=False, download=True, transform=transform)
@@ -109,7 +112,11 @@ def main():
 
     model = VAE(latent_dim=LATENT_DIM, lr=3e-4)
 
-    checkpoint_callback = ModelCheckpoint(monitor="val_loss", mode="min")
+    checkpoint_callback = ModelCheckpoint(
+        monitor="val_loss",
+        mode="min",
+        dirpath="/home/lucasc/Projects/gwnumb/checkpoints",
+        filename="mnist-16D")
 
     trainer = Trainer(
         max_epochs=55,

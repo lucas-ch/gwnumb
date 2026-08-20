@@ -1,23 +1,20 @@
 
-from shimmer import GWModuleBase, LatentsDomainGroupsT, LossOutput, RawDomainGroupsT
+
+from shimmer import GWModuleBase, LatentsDomainGroupsT, LossOutput
 from torch import nn
 import torch
 import torch.nn.functional as F
 
-from numb_project.data_module import rotate_item
-
-
 class UnitaryOperationModule(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, output_size: int):
+    def __init__(self, input_size: int, hidden_size: int, output_size: int, n_hidden_layers: int = 2):
         super().__init__()
 
-        self.transfo = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, output_size),
-        )
+        layers: list[nn.Module] = [nn.Linear(input_size, hidden_size), nn.ReLU()]
+        for _ in range(n_hidden_layers - 1):
+            layers += [nn.Linear(hidden_size, hidden_size), nn.ReLU()]
+        layers.append(nn.Linear(hidden_size, output_size))
+
+        self.transfo = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.transfo(x)
@@ -194,76 +191,3 @@ class OperationSelectionModule(nn.Module):
             new_gw_state = new_gw_state + operation_selection_weight * operation_result
 
         return new_gw_state, operation_selection_vector
-
-
-def get_input_target_shift_loss(
-    gw_mod: GWModuleBase, latent_domains: LatentsDomainGroupsT, shift: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-        digit_one_hot = latent_domains[frozenset({"digit", "image"})]['digit']
-        target_one_hot = torch.roll(digit_one_hot, shifts=shift, dims=1)
-        image = latent_domains[frozenset({"digit", "image"})]['image']
-
-        with torch.no_grad():
-            input = gw_mod.gw_encoders["image"](image)
-            target = gw_mod.gw_encoders["digit"](target_one_hot)
-
-        return input, target
-
-def get_input_target_rotation_loss(
-    gw_mod: GWModuleBase, raw_data: RawDomainGroupsT, degrees: float
-) -> tuple[torch.Tensor, torch.Tensor]:
-        # La rotation doit s'appliquer sur l'image brute (pixels) et non sur le
-        # latent du domaine "image" (ex : mu d'un VAE), qui n'a pas de structure
-        # spatiale.
-        image = raw_data[frozenset({"digit", "image"})]['image']
-        rotated_image = rotate_item({"image": image}, degrees)["image"]
-
-        with torch.no_grad():
-            image_latent = gw_mod.domain_mods["image"].encode(image)
-            rotated_latent = gw_mod.domain_mods["image"].encode(rotated_image)
-            input = gw_mod.gw_encoders["image"](image_latent)
-            target = gw_mod.gw_encoders["image"](rotated_latent)
-
-        return input, target
-
-class RotateOperationModule(UnitaryOperationModule):
-    def __init__(self, input_size: int, hidden_size: int, output_size: int):
-        super().__init__(input_size, hidden_size, output_size)
-
-    def loss(
-        self,
-        gw_mod: GWModuleBase,
-        raw_data: RawDomainGroupsT,
-    ) -> torch.Tensor:
-        input, target = get_input_target_rotation_loss(gw_mod, raw_data, 10)
-        pred = self(input)
-
-        return F.mse_loss(pred, target)
-
-class AddOperationModule(UnitaryOperationModule):
-    def __init__(self, input_size: int, hidden_size: int, output_size: int):
-        super().__init__(input_size, hidden_size, output_size)
-
-    def loss(
-        self,
-        gw_mod: GWModuleBase,
-        latent_domains: LatentsDomainGroupsT,
-    ) -> torch.Tensor:
-        input, target = get_input_target_shift_loss(gw_mod, latent_domains, 1)
-        pred = self(input)
-
-        return F.mse_loss(pred, target)
-
-class SubOperationModule(UnitaryOperationModule):
-    def __init__(self, input_size: int, hidden_size: int, output_size: int):
-        super().__init__(input_size, hidden_size, output_size)
-
-    def loss(
-        self,
-        gw_mod: GWModuleBase,
-        latent_domains: LatentsDomainGroupsT,
-    ) -> torch.Tensor:
-        input, target = get_input_target_shift_loss(gw_mod, latent_domains, -1)
-        pred = self(input)
-
-        return F.mse_loss(pred, target)

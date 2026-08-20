@@ -16,10 +16,12 @@ from numb_project.gw_model import (
     load_pretrained_global_workspace,
     setup_global_workspace,
 )
-from numb_project.operation_module import AddOperationModule, ChainOperationModule, OperationSelectionModule, RotateOperationModule, SubOperationModule
+from numb_project.operation_arithmetic_module import AddOperationModule, SubOperationModule
+from numb_project.operation_module import ChainOperationModule, OperationSelectionModule
+from numb_project.operation_rotation_module import GwRotateOperationModule, PixelRotateOperationModule
 
 GW_SIZE = BASE  # OperationSelectionModule's LSTMCell expects task one-hots of width BASE as its GW-sized input.
-IMAGE_SHAPE = (1, 4, 4)  # spatial shape so RotateOperationModule can rotate it like a real image.
+IMAGE_SHAPE = (1, 28, 28)  # matches MNIST_IMAGE_SHAPE : PixelRotateOperationModule's CNN is sized for 28x28 input.
 IMAGE_DIM = IMAGE_SHAPE[0] * IMAGE_SHAPE[1] * IMAGE_SHAPE[2]
 HIDDEN_DIM = 8
 CHAIN_LENGTH = 2
@@ -58,10 +60,18 @@ REPRESENTATION_LOSS_COEFS = {
 }
 LOSS_COEFS = {
     "representation_loss": 1.0,
+    "representation_loss_rotated": 1.0,
     "add_loss": 1.0,
     "sub_loss": 1.0,
-    "rotate_loss": 1.0,
+    "rotate_pixel_loss": 1.0,
+    "rotate_pixel_loss_rotated": 1.0,
+    "rotate_gw_loss": 1.0,
+    "rotate_gw_loss_rotated": 1.0,
     "task_loss": 1.0,
+}
+ROTATION_OPERATIONS_CONFIG = {
+    "pixel": {"latent_dim": HIDDEN_DIM},
+    "gw": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
 }
 
 
@@ -74,6 +84,7 @@ def make_config(batch_size: int = BATCH_SIZE, lr: float = 1e-3) -> dict[str, Any
             "decoders": {"hidden_dim": hidden_dim, "n_layers": 1},
             "representation_loss_coefficients": REPRESENTATION_LOSS_COEFS,
             "loss_coefficients": LOSS_COEFS,
+            "rotation_operations": ROTATION_OPERATIONS_CONFIG,
         },
         "training": {"batch_size": batch_size, "optim": {"lr": lr}},
     }
@@ -99,8 +110,9 @@ def make_workspace() -> tuple[MyGlobalWorkspace, dict]:
     operation_mod = nn.ModuleDict({
         "add": AddOperationModule(GW_SIZE, HIDDEN_DIM, GW_SIZE),
         "sub": SubOperationModule(GW_SIZE, HIDDEN_DIM, GW_SIZE),
-        "rotate": RotateOperationModule(GW_SIZE, HIDDEN_DIM, GW_SIZE),
     })
+    operation_rotate_pixel_mod = PixelRotateOperationModule(latent_dim=HIDDEN_DIM)
+    operation_rotate_gw_mod = GwRotateOperationModule(gw_size=GW_SIZE, hidden_size=HIDDEN_DIM, latent_dim=HIDDEN_DIM)
     operation_selection_mod = OperationSelectionModule(
         input_size=GW_SIZE, output_size=1 + len(operation_mod), hidden_size=HIDDEN_DIM, batch_size=BATCH_SIZE, device="cpu"
     )
@@ -118,6 +130,8 @@ def make_workspace() -> tuple[MyGlobalWorkspace, dict]:
         operation_mod=operation_mod,
         operation_selection_mod=operation_selection_mod,
         task_mod=task_mod,
+        operation_rotate_pixel_mod=operation_rotate_pixel_mod,
+        operation_rotate_gw_mod=operation_rotate_gw_mod,
     )
 
     workspace = MyGlobalWorkspace(
@@ -128,6 +142,8 @@ def make_workspace() -> tuple[MyGlobalWorkspace, dict]:
         operation_mod=operation_mod,
         operation_selection_mod=operation_selection_mod,
         task_mod=task_mod,
+        operation_rotate_pixel_mod=operation_rotate_pixel_mod,
+        operation_rotate_gw_mod=operation_rotate_gw_mod,
     )
 
     image = torch.randn(BATCH_SIZE, *IMAGE_SHAPE)
@@ -153,6 +169,8 @@ class TestMyGlobalWorkspace:
         assert isinstance(workspace.operation_module, nn.ModuleDict)
         assert isinstance(workspace.operation_selection_module, OperationSelectionModule)
         assert isinstance(workspace.task_mod, ChainOperationModule)
+        assert isinstance(workspace.operation_rotate_pixel_module, PixelRotateOperationModule)
+        assert isinstance(workspace.operation_rotate_gw_module, GwRotateOperationModule)
         assert workspace.gw_mod is workspace.loss_mod.gw_mod
 
     def test_configure_optimizers_returns_adamw(self, workspace_and_batch) -> None:
@@ -198,6 +216,8 @@ class TestMyCustomGWLosses:
 
         assert loss_mod.operation_mod is workspace.operation_module
         assert loss_mod.task_mod is workspace.task_mod
+        assert loss_mod.operation_rotate_pixel_mod is workspace.operation_rotate_pixel_module
+        assert loss_mod.operation_rotate_gw_mod is workspace.operation_rotate_gw_module
         assert loss_mod.representation_loss_coefs == REPRESENTATION_LOSS_COEFS
 
     def test_compute_representation_loss_returns_scalar_and_metrics(self, workspace_and_batch) -> None:
@@ -235,16 +255,18 @@ class TestModuleFunctions:
         config = make_config()
         domains_configs = [LoadedDomainConfig(domain_type="digit")]
 
-        gw_mod, selection_mod, operation_mod, operation_selection_mod, task_mod, loss_mod = get_global_workspace_mods(
+        gw_mod, selection_mod, operation_mod, operation_selection_mod, task_mod, loss_mod, operation_rotate_pixel_mod, operation_rotate_gw_mod = get_global_workspace_mods(
             config, domains_configs
         )
 
         assert isinstance(gw_mod, GWModule)
         assert isinstance(selection_mod, SingleDomainSelection)
-        assert set(operation_mod.keys()) == {"add", "sub", "rotate"}
+        assert set(operation_mod.keys()) == {"add", "sub"}
         assert isinstance(operation_selection_mod, OperationSelectionModule)
         assert isinstance(task_mod, ChainOperationModule)
         assert isinstance(loss_mod, MyCustomGWLosses)
+        assert isinstance(operation_rotate_pixel_mod, PixelRotateOperationModule)
+        assert isinstance(operation_rotate_gw_mod, GwRotateOperationModule)
         assert set(gw_mod.domain_mods.keys()) == {"digit"}
 
     def test_setup_global_workspace_returns_configured_workspace(self) -> None:
