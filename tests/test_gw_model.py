@@ -66,6 +66,7 @@ LOSS_COEFS = {
 }
 ROTATION_OPERATIONS_CONFIG = {
     "degrees": 30.0,
+    "n_steps": 2,
     "pixel": {"latent_dim": HIDDEN_DIM},
     "gw": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
 }
@@ -256,6 +257,7 @@ class TestModuleFunctions:
         assert isinstance(operation_rotate_pixel_mod, PixelRotateOperationModule)
         assert isinstance(operation_rotate_gw_mod, GwRotateOperationModule)
         assert operation_rotate_pixel_mod.degrees == operation_rotate_gw_mod.degrees == 30.0
+        assert operation_rotate_pixel_mod.n_steps == operation_rotate_gw_mod.n_steps == 2
         assert set(gw_mod.domain_mods.keys()) == {"digit"}
         assert set(gw_mod.gw_encoders.keys()) == {"digit"}
         # les domaines doivent être des sous-modules du GW (state_dict, .to(device))

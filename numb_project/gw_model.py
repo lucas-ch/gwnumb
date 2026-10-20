@@ -219,6 +219,7 @@ def get_global_workspace_mods(
     operation_rotate_pixel_mod = PixelRotateOperationModule(
         latent_dim=rotation_ops_config["pixel"]["latent_dim"],
         degrees=rotation_ops_config["degrees"],
+        n_steps=rotation_ops_config["n_steps"],
     )
 
     operation_rotate_gw_mod = GwRotateOperationModule(
@@ -226,6 +227,7 @@ def get_global_workspace_mods(
         hidden_size=rotation_ops_config["gw"]["hidden_size"],
         latent_dim=rotation_ops_config["gw"]["latent_dim"],
         degrees=rotation_ops_config["degrees"],
+        n_steps=rotation_ops_config["n_steps"],
     )
 
     loss_mod = MyCustomGWLosses(

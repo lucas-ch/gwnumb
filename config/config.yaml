@@ -34,8 +34,11 @@ global_workspace:
     #    hidden_size = largeur des couches denses et latent_dim = taille de la
     #    couche intermédiaire (goulot seulement si < latent_dim du GW).
     # degrees : angle de la rotation apprise, commun aux deux variantes.
+    # n_steps : nombre de rotations enchaînées dans la loss (1 = une seule
+    #    rotation) ; la loss est la moyenne sur les étapes 1..n_steps.
     rotation_operations:
         degrees: 20.0
+        n_steps: 4
         pixel:
             latent_dim: 64
         gw:
