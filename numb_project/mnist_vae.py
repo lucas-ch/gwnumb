@@ -6,7 +6,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
-from numb_project.data_module import rotate_image_batch
+from numb_project.utils import rotate_images
 
 LATENT_DIM = 20
 
@@ -79,7 +79,7 @@ class VAE(LightningModule):
         x, _ = batch  # MNIST retourne (image, label), on ignore le label
         # Même rotation (bilinéaire, sur GPU) que celle appliquée dans le GW
         angle_deg = torch.rand(x.size(0), device=x.device) * 360.0
-        x = rotate_image_batch(x, angle_deg)
+        x = rotate_images(x, angle_deg)
         x_hat, mu, logvar = self(x)
 
         recon_loss = F.binary_cross_entropy(x_hat, x, reduction="sum") / x.size(0)

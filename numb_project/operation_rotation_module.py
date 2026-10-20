@@ -1,9 +1,10 @@
-from shimmer import GWModuleBase, RawDomainGroupsT
+from shimmer import GWModule, GWModuleBase, RawDomainGroupsT
 from torch import nn
 import torch
 import torch.nn.functional as F
 
-from numb_project.data_module import rotate_image_batch
+from numb_project.constants import BASE
+from numb_project.utils import angle_to_cos_sin, rotate_images
 
 
 class PixelRotateOperationModule(nn.Module):
@@ -54,7 +55,7 @@ class PixelRotateOperationModule(nn.Module):
 
         angle_deg = torch.full((batch_size,), self.degrees, device=image.device)
         with torch.no_grad():
-            target = rotate_image_batch(image, angle_deg)
+            target = rotate_images(image, angle_deg)
 
         pred = self(image)
 
@@ -66,8 +67,8 @@ class GwRotateOperationModule(nn.Module):
     défaut), pour un angle fixe. Même structure que PixelRotateOperationModule
     (encodeur -> goulot d'étranglement `latent_dim` -> décodeur), mais avec des
     couches denses plutôt que des convolutions puisque l'espace GW n'a pas de
-    structure spatiale ; pas de Sigmoid final non plus, les coordonnées GW
-    n'étant pas bornées comme des pixels."""
+    structure spatiale. Tanh final : l'état GW est tanh(encodeur GW), donc dans
+    [-1, 1]."""
 
     def __init__(
         self,
@@ -97,25 +98,70 @@ class GwRotateOperationModule(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.encoder(x)
-        return self.decoder(z)
+        return torch.tanh(self.decoder(z))
+
+    @staticmethod
+    def image_to_gw_state(gw_mod: GWModule, image: torch.Tensor) -> torch.Tensor:
+        # État GW réel d'une image seule : tanh de l'encodage GW (cf GWModule.fuse)
+        image_latent = gw_mod.domain_mods["image"].encode(image)
+        return gw_mod.fusion_activation_fn(gw_mod.gw_encoders["image"](image_latent))
 
     def loss(
         self,
-        gw_mod: GWModuleBase,
+        gw_mod: GWModule,
         raw_data: RawDomainGroupsT,
     ) -> torch.Tensor:
         image = raw_data[frozenset({"digit", "image"})]['image']
         batch_size = image.shape[0]
 
         angle_deg = torch.full((batch_size,), self.degrees, device=image.device)
-        rotated_image = rotate_image_batch(image, angle_deg)
+        rotated_image = rotate_images(image, angle_deg)
 
         with torch.no_grad():
-            image_latent = gw_mod.domain_mods["image"].encode(image)
-            rotated_latent = gw_mod.domain_mods["image"].encode(rotated_image)
-            input = gw_mod.gw_encoders["image"](image_latent)
-            target = gw_mod.gw_encoders["image"](rotated_latent)
+            input = self.image_to_gw_state(gw_mod, image)
+            target = self.image_to_gw_state(gw_mod, rotated_image)
 
         pred = self(input)
 
         return F.mse_loss(pred, target)
+
+    @torch.no_grad()
+    def metrics(
+        self,
+        gw_mod: GWModule,
+        raw_data: RawDomainGroupsT,
+    ) -> dict[str, torch.Tensor]:
+        """Métriques pour comparer avec PixelRotateOperationModule (non utilisées
+        dans la loss) :
+         - pixel_mse : la prédiction GW est décodée jusqu'aux pixels (décodeur GW
+           puis décodeur du VAE) et comparée à l'image tournée, comme rotate_pixel_loss ;
+         - vae_floor_pixel_mse : MSE de l'image tournée passée par le VAE seul,
+           plancher que la voie GW ne peut pas battre ;
+         - angle_error_deg : la prédiction est décodée vers le domaine digit et
+           l'angle lu dans (cos, sin) est comparé à l'angle de départ + `degrees`."""
+        pair_key = frozenset({"digit", "image"})
+        image = raw_data[pair_key]['image']
+        digit = raw_data[pair_key]['digit']
+        image_mod = gw_mod.domain_mods["image"]
+
+        angle_deg = torch.full((image.shape[0],), self.degrees, device=image.device)
+        rotated_image = rotate_images(image, angle_deg)
+
+        pred = self(self.image_to_gw_state(gw_mod, image))
+        pred_pixels = image_mod.decode(gw_mod.gw_decoders["image"](pred))
+        vae_pixels = image_mod.decode(image_mod.encode(rotated_image))
+
+        start_angle = torch.rad2deg(torch.atan2(digit[:, BASE + 1], digit[:, BASE]))
+        target_cos_sin = angle_to_cos_sin(start_angle + self.degrees)
+        pred_cos_sin = gw_mod.gw_decoders["digit"](pred)[:, BASE:]
+        # Angle entre les vecteurs (cos, sin) prédit et cible, dans [0, 180]
+        angle_error = torch.rad2deg(torch.atan2(
+            pred_cos_sin[:, 1] * target_cos_sin[:, 0] - pred_cos_sin[:, 0] * target_cos_sin[:, 1],
+            (pred_cos_sin * target_cos_sin).sum(dim=-1),
+        )).abs()
+
+        return {
+            "pixel_mse": F.mse_loss(pred_pixels, rotated_image),
+            "vae_floor_pixel_mse": F.mse_loss(vae_pixels, rotated_image),
+            "angle_error_deg": angle_error.mean(),
+        }

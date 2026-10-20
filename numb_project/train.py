@@ -39,7 +39,13 @@ def get_training_objects(
     else:
         global_workspace = setup_global_workspace(config, domain_configs)
 
-    checkpoint_callback = ModelCheckpoint(dirpath=GW_CHECKPOINT_FOLDER, filename=training_name)
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=GW_CHECKPOINT_FOLDER,
+        filename=training_name,
+        monitor="val/loss",
+        mode="min",
+        save_last=True,
+    )
     trainer = Trainer(
         max_steps=config['training']['max_steps'],
         log_every_n_steps=1,

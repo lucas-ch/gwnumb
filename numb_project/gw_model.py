@@ -8,9 +8,9 @@ from torch.optim import AdamW
 import torch.nn.functional as F
 
 from numb_project.constants import BASE, DEVICE
-from numb_project.data_module import rotated_raw_image_groups
 from numb_project.domain_module import LoadedDomainConfig, load_domains
 from numb_project.operation_rotation_module import GwRotateOperationModule, PixelRotateOperationModule
+from numb_project.utils import angle_to_cos_sin, rotate_images
 from numb_project.utils import merge_metrics
 
 class MyGlobalWorkspace(GlobalWorkspaceBase):
@@ -62,6 +62,29 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
 
         return loss_output.loss
 
+def make_rotated_gw_batch(raw_data: RawDomainGroupsT) -> RawDomainGroupsT:
+    """Version tournée d'un batch du GW (format shimmer : groupe de domaines ->
+    données brutes), utilisée pour les losses `*_rotated`.
+
+    Chaque image du groupe apparié {digit, image} est tournée d'un angle
+    aléatoire dans [0, 360[, et le (cos, sin) de son digit est remplacé par cet
+    angle pour que l'image et le digit restent cohérents. Le groupe {image}
+    reçoit ces mêmes images tournées (et non celles du loader image seule) ;
+    le groupe {digit} est absent, n'ayant pas d'image à tourner."""
+    pair_key = frozenset({"digit", "image"})
+    image = raw_data[pair_key]["image"]
+    digit_raw = raw_data[pair_key]["digit"]
+
+    angle_deg = torch.rand(image.shape[0], device=image.device) * 360.0
+    rotated_image = rotate_images(image, angle_deg)
+    rotated_digit = torch.cat([digit_raw[:, :BASE], angle_to_cos_sin(angle_deg)], dim=-1)
+
+    single_key = frozenset({"image"})
+    return {
+        single_key: {"image": rotated_image},
+        pair_key: {"image": rotated_image, "digit": rotated_digit},
+    }
+
 class MyCustomGWLosses(GWLosses2Domains):
     def __init__(
         self,
@@ -82,7 +105,7 @@ class MyCustomGWLosses(GWLosses2Domains):
     def _rotated_image_groups(
         self, domain_latents: LatentsDomainGroupsT, raw_data: RawDomainGroupsT
     ) -> tuple[LatentsDomainGroupsT, RawDomainGroupsT]:
-        raw_rot = rotated_raw_image_groups(raw_data)
+        raw_rot = make_rotated_gw_batch(raw_data)
 
         single_key = frozenset({"image"})
         pair_key = frozenset({"digit", "image"})
@@ -143,6 +166,10 @@ class MyCustomGWLosses(GWLosses2Domains):
         metrics["rotate_pixel_loss_rotated"] = rotate_pixel_loss_rotated
         metrics["rotate_gw_loss"] = rotate_gw_loss
         metrics["rotate_gw_loss_rotated"] = rotate_gw_loss_rotated
+        for name, value in self.operation_rotate_gw_mod.metrics(self.gw_mod, raw_data).items():
+            metrics[f"rotate_gw_{name}"] = value
+        for name, value in self.operation_rotate_gw_mod.metrics(self.gw_mod, raw_rot).items():
+            metrics[f"rotate_gw_{name}_rotated"] = value
 
         total_loss = (
             loss_config['representation_loss'] * representation_loss
