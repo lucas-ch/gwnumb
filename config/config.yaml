@@ -31,8 +31,11 @@ global_workspace:
     #  - pixel : directement sur l'image (CNN), latent_dim = largeur du goulot
     #    d'étranglement entre l'encodeur et le décodeur convolutifs.
     #  - gw    : directement dans l'espace du global workspace (MLP), avec
-    #    hidden_size = largeur des couches denses et latent_dim = goulot.
+    #    hidden_size = largeur des couches denses et latent_dim = taille de la
+    #    couche intermédiaire (goulot seulement si < latent_dim du GW).
+    # degrees : angle de la rotation apprise, commun aux deux variantes.
     rotation_operations:
+        degrees: 20.0
         pixel:
             latent_dim: 64
         gw:

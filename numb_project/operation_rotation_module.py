@@ -9,8 +9,7 @@ from numb_project.utils import angle_to_cos_sin, rotate_images
 
 class PixelRotateOperationModule(nn.Module):
     """Rotation apprise directement sur l'image (CNN), pour un angle fixe
-    (`degrees`) : pas de conditionnement sur l'angle, le réseau apprend une
-    seule transformation constante image -> image pivotée de `degrees`."""
+    (`degrees`)."""
 
     def __init__(
         self,
@@ -33,10 +32,10 @@ class PixelRotateOperationModule(nn.Module):
 
         self.dec_fc = nn.Linear(latent_dim, c2 * 7 * 7)
         self.dec = nn.Sequential(
-            nn.ConvTranspose2d(c2, c1, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),  # 7->14
-            nn.ConvTranspose2d(c1, 1, kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.Sigmoid(),  # 14->28
+            nn.ConvTranspose2d(c2, c1, kernel_size=4, stride=2, padding=1),  # 7->14
+            nn.ReLU(),
+            nn.ConvTranspose2d(c1, 1, kernel_size=4, stride=2, padding=1),   # 14->28
+            nn.Sigmoid(),
         )
         self.channels = channels
 
@@ -56,8 +55,7 @@ class PixelRotateOperationModule(nn.Module):
         batch_size = image.shape[0]
 
         angle_deg = torch.full((batch_size,), self.degrees, device=image.device)
-        with torch.no_grad():
-            target = rotate_images(image, angle_deg)
+        target = rotate_images(image, angle_deg)
 
         pred = self(image)
 
@@ -66,11 +64,7 @@ class PixelRotateOperationModule(nn.Module):
 
 class GwRotateOperationModule(nn.Module):
     """Rotation apprise directement dans l'espace du global workspace (10D par
-    défaut), pour un angle fixe. Même structure que PixelRotateOperationModule
-    (encodeur -> goulot d'étranglement `latent_dim` -> décodeur), mais avec des
-    couches denses plutôt que des convolutions puisque l'espace GW n'a pas de
-    structure spatiale. Tanh final : l'état GW est tanh(encodeur GW), donc dans
-    [-1, 1]."""
+    défaut), pour un angle fixe."""
 
     def __init__(
         self,
@@ -121,10 +115,10 @@ class GwRotateOperationModule(nn.Module):
         rotated_image = rotate_images(image, angle_deg)
 
         with torch.no_grad():
-            input = self.image_to_gw_state(gw_mod, image)
+            gw_state = self.image_to_gw_state(gw_mod, image)
             target = self.image_to_gw_state(gw_mod, rotated_image)
 
-        pred = self(input)
+        pred = self(gw_state)
 
         return F.mse_loss(pred, target)
 

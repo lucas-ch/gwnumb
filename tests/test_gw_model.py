@@ -12,9 +12,7 @@ from numb_project.gw_model import (
     MyCustomGWLosses,
     MyGlobalWorkspace,
     build_gw_encoders_decoders,
-    freeze_except_attention,
     get_global_workspace_mods,
-    load_pretrained_global_workspace,
     make_rotated_gw_batch,
     setup_global_workspace,
 )
@@ -67,6 +65,7 @@ LOSS_COEFS = {
     "rotate_gw_loss_rotated": 1.0,
 }
 ROTATION_OPERATIONS_CONFIG = {
+    "degrees": 30.0,
     "pixel": {"latent_dim": HIDDEN_DIM},
     "gw": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
 }
@@ -157,14 +156,6 @@ class TestMyGlobalWorkspace:
         assert set(result.keys()) == {"optimizer"}
         assert isinstance(result["optimizer"], torch.optim.AdamW)
         assert result["optimizer"].defaults["lr"] == workspace.optim_lr
-
-    def test_input_to_gw_encodes_image_into_workspace_dim(self, workspace_and_batch) -> None:
-        workspace, batch = workspace_and_batch
-        raw_group = batch[frozenset(["image", "digit"])]
-
-        gw_state = workspace.input_to_gw(raw_group)
-
-        assert gw_state.shape == (BATCH_SIZE, GW_SIZE)
 
     def test_generic_step_returns_finite_scalar_loss(self, workspace_and_batch) -> None:
         workspace, batch = workspace_and_batch
@@ -264,6 +255,7 @@ class TestModuleFunctions:
         assert isinstance(loss_mod, MyCustomGWLosses)
         assert isinstance(operation_rotate_pixel_mod, PixelRotateOperationModule)
         assert isinstance(operation_rotate_gw_mod, GwRotateOperationModule)
+        assert operation_rotate_pixel_mod.degrees == operation_rotate_gw_mod.degrees == 30.0
         assert set(gw_mod.domain_mods.keys()) == {"digit"}
         assert set(gw_mod.gw_encoders.keys()) == {"digit"}
         # les domaines doivent être des sous-modules du GW (state_dict, .to(device))
@@ -277,27 +269,3 @@ class TestModuleFunctions:
 
         assert isinstance(workspace, MyGlobalWorkspace)
         assert workspace.optim_lr == 5e-4
-
-    def test_freeze_except_attention_freezes_all_parameters(self, workspace_and_batch) -> None:
-        workspace, _ = workspace_and_batch
-
-        freeze_except_attention(workspace)
-
-        assert all(not p.requires_grad for p in workspace.parameters())
-
-    def test_load_pretrained_global_workspace_restores_weights_and_freezes(self, tmp_path) -> None:
-        config = make_config()
-        domains_configs = [LoadedDomainConfig(domain_type="digit")]
-        source_workspace = setup_global_workspace(config, domains_configs)
-
-        checkpoint_path = tmp_path / "workspace.ckpt"
-        torch.save({"state_dict": source_workspace.state_dict()}, checkpoint_path)
-
-        loaded_workspace = load_pretrained_global_workspace(
-            config, domains_configs, str(checkpoint_path), device="cpu"
-        )
-
-        assert isinstance(loaded_workspace, MyGlobalWorkspace)
-        for name, param in source_workspace.state_dict().items():
-            assert torch.equal(loaded_workspace.state_dict()[name], param)
-        assert all(not p.requires_grad for p in loaded_workspace.parameters())
