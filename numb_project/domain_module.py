@@ -2,14 +2,13 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from pydantic import BaseModel
-from shimmer import DomainModule, GWDecoder, GWEncoder, LossOutput
+from shimmer import DomainModule, LossOutput
 import torch
 from torch import nn
-from torch.nn import Linear, Module
+from torch.nn import Linear
 import torch.nn.functional as F
 
 from numb_project.mnist_vae import VAE
-from numb_project.utils import get_from_dict_or_val
 from numb_project.constants import BASE, DIGIT_DIM, VAE_CHECKPOINT_FILE
 
 
@@ -101,12 +100,11 @@ def get_domains_config(domains: list[str], digit_args: Mapping[str, Any] | None 
 
     return domains_config
 
-def load_pretrained_module(domain: LoadedDomainConfig) -> DomainModule:
+def load_domain_module(domain: LoadedDomainConfig) -> DomainModule:
     module: DomainModule
     match domain.domain_type:
         case "image":
-            CKPT_PATH = domain.checkpoint_path
-            vae = VAE.load_from_checkpoint(CKPT_PATH)
+            vae = VAE.load_from_checkpoint(domain.checkpoint_path)
             vae.eval()
             vae.freeze()
 
@@ -116,59 +114,7 @@ def load_pretrained_module(domain: LoadedDomainConfig) -> DomainModule:
             module = DigitAngleDomain(**domain.args)
     return module
 
-def load_domain(
-    domain: LoadedDomainConfig,
-    workspace_dim: int,
-    encoders_hidden_dim: int | Mapping[str, int],
-    encoders_n_layers: int | Mapping[str, int],
-    decoders_hidden_dim: int | Mapping[str, int],
-    decoders_n_layers: int | Mapping[str, int]) -> tuple[DomainModule, Module, Module]:
-        module = load_pretrained_module(domain)
-        encoder_hidden_dim = get_from_dict_or_val(
-            encoders_hidden_dim, domain.domain_type, "global_workspace.encoders.hidden_dim"
-        )
-        decoder_hidden_dim = get_from_dict_or_val(
-            decoders_hidden_dim, domain.domain_type, "global_workspace.decoders.hidden_dim"
-        )
-
-        encoder_n_layers = get_from_dict_or_val(
-            encoders_n_layers, domain.domain_type, "global_workspace.encoder.n_layers"
-        )
-
-        decoder_n_layers = get_from_dict_or_val(
-            decoders_n_layers, domain.domain_type, "global_workspace.decoders.n_layers"
-        )
-
-        gw_encoder = GWEncoder(
-            module.latent_dim, encoder_hidden_dim, workspace_dim, encoder_n_layers
-                )
-        gw_decoder = GWDecoder(
-                        workspace_dim, decoder_hidden_dim, module.latent_dim, decoder_n_layers
-                    )
-
-        return module, gw_encoder, gw_decoder
-
-def load_domains(
-    domains: Sequence[LoadedDomainConfig],
-    workspace_dim: int,
-    encoders_hidden_dim: int | Mapping[str, int],
-    encoders_n_layers: int | Mapping[str, int],
-    decoders_hidden_dim: int | Mapping[str, int],
-    decoders_n_layers: int | Mapping[str, int]) -> tuple[nn.ModuleDict, nn.ModuleDict, nn.ModuleDict]:
-        modules: dict[str, DomainModule] = {}
-        gw_encoders: dict[str, Module] = {}
-        gw_decoders: dict[str, Module] = {}
-        for domain in domains:
-            model, encoder, decoder = load_domain(
-                domain,
-                workspace_dim,
-                encoders_hidden_dim,
-                encoders_n_layers,
-                decoders_hidden_dim,
-                decoders_n_layers,
-            )
-            modules[domain.domain_type] = model
-            gw_encoders[domain.domain_type] = encoder
-            gw_decoders[domain.domain_type] = decoder
-
-        return nn.ModuleDict(modules), nn.ModuleDict(gw_encoders), nn.ModuleDict(gw_decoders)
+def load_domain_modules(domains: Sequence[LoadedDomainConfig]) -> nn.ModuleDict:
+    # ModuleDict (et non dict) : les domaines doivent être des sous-modules du GW
+    # pour être dans son state_dict et suivre ses .to(device)
+    return nn.ModuleDict({domain.domain_type: load_domain_module(domain) for domain in domains})

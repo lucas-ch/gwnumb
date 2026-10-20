@@ -22,13 +22,11 @@ class MnistDataset(Dataset):
         image = self.mnist_dataset[idx][0]
         digit = self.mnist_dataset[idx][1]
         digit_one_hot = F.one_hot(torch.tensor(digit), num_classes=BASE).float()
-        # Angle de l'image : 0° quand le digit est apparié à l'image (droite),
-        # aléatoire quand le digit est seul, pour couvrir tous les angles
-        angle_deg = torch.tensor(0.0) if "image" in self.domain else torch.rand(()) * 360.0
+        upright_angle = angle_to_cos_sin(torch.tensor(0.0))
 
         available = {
             "image": image,
-            "digit": torch.cat([digit_one_hot, angle_to_cos_sin(angle_deg)]),
+            "digit": torch.cat([digit_one_hot, upright_angle]),
         }
 
         return {key: available[key] for key in self.domain}

@@ -33,8 +33,10 @@ class PixelRotateOperationModule(nn.Module):
 
         self.dec_fc = nn.Linear(latent_dim, c2 * 7 * 7)
         self.dec = nn.Sequential(
-            nn.ConvTranspose2d(c2, c1, kernel_size=3, stride=2, padding=1, output_padding=1), nn.ReLU(),  # 7->14
-            nn.ConvTranspose2d(c1, 1, kernel_size=3, stride=2, padding=1, output_padding=1), nn.Sigmoid(),  # 14->28
+            nn.ConvTranspose2d(c2, c1, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),  # 7->14
+            nn.ConvTranspose2d(c1, 1, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.Sigmoid(),  # 14->28
         )
         self.channels = channels
 
@@ -94,11 +96,12 @@ class GwRotateOperationModule(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, gw_size),
+            nn.Tanh()
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.encoder(x)
-        return torch.tanh(self.decoder(z))
+        return self.decoder(z)
 
     @staticmethod
     def image_to_gw_state(gw_mod: GWModule, image: torch.Tensor) -> torch.Tensor:

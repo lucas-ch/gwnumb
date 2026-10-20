@@ -1,13 +1,15 @@
 import torch
 import torch.nn.functional as F
 
-from numb_project.constants import BASE
+from numb_project.constants import BASE, DIGIT_DIM
 from numb_project.domain_module import (
+    DigitAngleDomain,
     IdentityDomain,
     LoadedDomainConfig,
     MNISTDomain,
     get_domains_config,
-    load_pretrained_module,
+    load_domain_module,
+    load_domain_modules,
 )
 from numb_project.mnist_vae import VAE
 
@@ -54,8 +56,31 @@ def test_get_domains_config_builds_one_config_per_domain() -> None:
     assert len(configs) == 2
 
 
-def test_load_pretrained_module_digit_returns_identity_domain() -> None:
-    module = load_pretrained_module(LoadedDomainConfig(domain_type="digit"))
+def test_load_domain_module_digit_returns_digit_angle_domain() -> None:
+    module = load_domain_module(LoadedDomainConfig(domain_type="digit", args={"angle_loss_weight": 0.5}))
 
-    assert isinstance(module, IdentityDomain)
-    assert module.size == BASE
+    assert isinstance(module, DigitAngleDomain)
+    assert module.size == DIGIT_DIM
+    assert module.angle_loss_weight == 0.5
+
+
+def test_load_domain_modules_keys_modules_by_domain_type() -> None:
+    modules = load_domain_modules([LoadedDomainConfig(domain_type="digit")])
+
+    assert isinstance(modules, torch.nn.ModuleDict)
+    assert set(modules.keys()) == {"digit"}
+    assert isinstance(modules["digit"], DigitAngleDomain)
+
+
+def test_digit_angle_domain_loss_weights_digit_and_angle_parts_separately() -> None:
+    domain = DigitAngleDomain(angle_loss_weight=2.0)
+    pred = torch.randn(4, DIGIT_DIM)
+    target = torch.randn(4, DIGIT_DIM)
+
+    loss = domain.compute_loss(pred, target, raw_target=None)
+
+    digit_loss = F.mse_loss(pred[:, :BASE], target[:, :BASE])
+    angle_loss = F.mse_loss(pred[:, BASE:], target[:, BASE:])
+    assert torch.isclose(loss.metrics["digit"], digit_loss)
+    assert torch.isclose(loss.metrics["angle"], angle_loss)
+    assert torch.isclose(loss.loss, digit_loss + 2.0 * angle_loss)

@@ -1,6 +1,6 @@
 from typing import Any, Callable, Mapping
 
-from shimmer import ContrastiveLoss, DomainModule, GWLosses2Domains, GWModule, GlobalWorkspaceBase, LatentsDomainGroupsT, LossCoefs, LossOutput, ModelModeT, RawDomainGroupT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
+from shimmer import ContrastiveLoss, DomainModule, GWDecoder, GWEncoder, GWLosses2Domains, GWModule, GlobalWorkspaceBase, LatentsDomainGroupsT, LossCoefs, LossOutput, ModelModeT, RawDomainGroupT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
 from shimmer.modules.losses import GWLosses
 import torch
 from torch import nn
@@ -8,10 +8,10 @@ from torch.optim import AdamW
 import torch.nn.functional as F
 
 from numb_project.constants import BASE, DEVICE
-from numb_project.domain_module import LoadedDomainConfig, load_domains
+from numb_project.domain_module import LoadedDomainConfig, load_domain_modules
 from numb_project.operation_rotation_module import GwRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import angle_to_cos_sin, rotate_images
-from numb_project.utils import merge_metrics
+from numb_project.utils import get_from_dict_or_val, merge_metrics
 
 class MyGlobalWorkspace(GlobalWorkspaceBase):
     def __init__(
@@ -35,13 +35,6 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         )
         return {"optimizer": optimizer}
 
-    def input_to_gw(self, raw_group: RawDomainGroupT) -> torch.Tensor:
-        image = raw_group["image"]
-        image_to_latent = self.encode_domain(image, "image")
-        gw_state = self.gw_mod.gw_encoders["image"](image_to_latent)
-
-        return gw_state
-
     def generic_step(
         self,
         batch: RawDomainGroupsT,
@@ -50,8 +43,6 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         domain_latents = self.encode_domains(batch)
         raw_group = batch[frozenset({"digit", "image"})]
                 
-        init_gw_state = self.input_to_gw(raw_group)
-
         loss_output = self.loss_mod.step(
             batch, domain_latents, mode,
         )
@@ -61,29 +52,6 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
             self.log(f"{mode}/{name}", metric, batch_size=batch_size, add_dataloader_idx=False)
 
         return loss_output.loss
-
-def make_rotated_gw_batch(raw_data: RawDomainGroupsT) -> RawDomainGroupsT:
-    """Version tournée d'un batch du GW (format shimmer : groupe de domaines ->
-    données brutes), utilisée pour les losses `*_rotated`.
-
-    Chaque image du groupe apparié {digit, image} est tournée d'un angle
-    aléatoire dans [0, 360[, et le (cos, sin) de son digit est remplacé par cet
-    angle pour que l'image et le digit restent cohérents. Le groupe {image}
-    reçoit ces mêmes images tournées (et non celles du loader image seule) ;
-    le groupe {digit} est absent, n'ayant pas d'image à tourner."""
-    pair_key = frozenset({"digit", "image"})
-    image = raw_data[pair_key]["image"]
-    digit_raw = raw_data[pair_key]["digit"]
-
-    angle_deg = torch.rand(image.shape[0], device=image.device) * 360.0
-    rotated_image = rotate_images(image, angle_deg)
-    rotated_digit = torch.cat([digit_raw[:, :BASE], angle_to_cos_sin(angle_deg)], dim=-1)
-
-    single_key = frozenset({"image"})
-    return {
-        single_key: {"image": rotated_image},
-        pair_key: {"image": rotated_image, "digit": rotated_digit},
-    }
 
 class MyCustomGWLosses(GWLosses2Domains):
     def __init__(
@@ -102,25 +70,16 @@ class MyCustomGWLosses(GWLosses2Domains):
         self.operation_rotate_gw_mod = operation_rotate_gw_mod
         self.representation_loss_coefs = representation_loss_coefs
 
-    def _rotated_image_groups(
-        self, domain_latents: LatentsDomainGroupsT, raw_data: RawDomainGroupsT
+    def _rotated_batch(
+        self, raw_data: RawDomainGroupsT
     ) -> tuple[LatentsDomainGroupsT, RawDomainGroupsT]:
+        """Batch tourné (cf make_rotated_gw_batch) et ses latents de domaines."""
         raw_rot = make_rotated_gw_batch(raw_data)
-
-        single_key = frozenset({"image"})
-        pair_key = frozenset({"digit", "image"})
-
-        image_mod = self.domain_mods["image"]
         with torch.no_grad():
-            rotated_latent = image_mod.encode(raw_rot[single_key]["image"])
-
-        # Le digit tourné contient le nouvel angle, on ne reprend pas celui de domain_latents
-        digit_latent = self.domain_mods["digit"].encode(raw_rot[pair_key]["digit"])
-
-        latents_rot = {
-            single_key: {"image": rotated_latent},
-            pair_key: {"image": rotated_latent, "digit": digit_latent},
-        }
+            latents_rot = {
+                domains: {domain: self.domain_mods[domain].encode(x) for domain, x in group.items()}
+                for domains, group in raw_rot.items()
+            }
         return latents_rot, raw_rot
 
     def compute_representation_loss(
@@ -151,7 +110,7 @@ class MyCustomGWLosses(GWLosses2Domains):
     ) -> LossOutput:
         loss_config = self.loss_coefs
 
-        latents_rot, raw_rot = self._rotated_image_groups(domain_latents, raw_data)
+        latents_rot, raw_rot = self._rotated_batch(raw_data)
 
         representation_loss, metrics = self.compute_representation_loss(raw_data, domain_latents)
         representation_loss_rotated, metrics_rotated = self.compute_representation_rotated_loss(raw_rot, latents_rot)
@@ -182,6 +141,54 @@ class MyCustomGWLosses(GWLosses2Domains):
 
         return LossOutput(total_loss, metrics)
 
+def make_rotated_gw_batch(raw_data: RawDomainGroupsT) -> RawDomainGroupsT:
+    """Version tournée d'un batch du GW (format shimmer : groupe de domaines ->
+    données brutes), utilisée pour les losses `*_rotated`."""
+
+    batch_size = len(raw_data[frozenset({"digit", "image"})]["image"])
+    assert all(len(x) == batch_size for group in raw_data.values() for x in group.values()), \
+        "tous les groupes doivent avoir la même taille de batch pour partager les angles"
+    device = raw_data[frozenset({"digit", "image"})]["image"].device
+    angle_deg = torch.rand(batch_size, device=device) * 360.0
+
+    def rotate_group(group: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        rotated = {}
+        if "image" in group:
+            rotated["image"] = rotate_images(group["image"], angle_deg)
+        if "digit" in group:
+            rotated["digit"] = torch.cat([group["digit"][:, :BASE], angle_to_cos_sin(angle_deg)], dim=-1)
+        return rotated
+
+    return {domains: rotate_group(group) for domains, group in raw_data.items()}
+
+def build_gw_encoders_decoders(
+    domain_modules: Mapping[str, DomainModule],
+    workspace_dim: int,
+    encoders_hidden_dim: int | Mapping[str, int],
+    encoders_n_layers: int | Mapping[str, int],
+    decoders_hidden_dim: int | Mapping[str, int],
+    decoders_n_layers: int | Mapping[str, int],
+) -> tuple[nn.ModuleDict, nn.ModuleDict]:
+    """Crée (non entraînés) un encodeur latent du domaine -> GW et un décodeur
+    GW -> latent du domaine pour chaque domaine. Les tailles cachées et nombres
+    de couches sont soit communs (int), soit donnés par domaine (dict)."""
+    gw_encoders: dict[str, nn.Module] = {}
+    gw_decoders: dict[str, nn.Module] = {}
+    for name, module in domain_modules.items():
+        gw_encoders[name] = GWEncoder(
+            module.latent_dim,
+            get_from_dict_or_val(encoders_hidden_dim, name, "global_workspace.encoders.hidden_dim"),
+            workspace_dim,
+            get_from_dict_or_val(encoders_n_layers, name, "global_workspace.encoders.n_layers"),
+        )
+        gw_decoders[name] = GWDecoder(
+            workspace_dim,
+            get_from_dict_or_val(decoders_hidden_dim, name, "global_workspace.decoders.hidden_dim"),
+            module.latent_dim,
+            get_from_dict_or_val(decoders_n_layers, name, "global_workspace.decoders.n_layers"),
+        )
+    return nn.ModuleDict(gw_encoders), nn.ModuleDict(gw_decoders)
+
 def get_global_workspace_mods(
         config: dict[str, Any],
         domains_configs: list[LoadedDomainConfig],
@@ -189,10 +196,10 @@ def get_global_workspace_mods(
     selection_mod = SingleDomainSelection()
     contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
     gw_size = config["global_workspace"]["latent_dim"]
-    batch_size = config["training"]["batch_size"]
 
-    domain_modules, gw_encoders, gw_decoders = load_domains(
-        domains_configs,
+    domain_modules = load_domain_modules(domains_configs)
+    gw_encoders, gw_decoders = build_gw_encoders_decoders(
+        domain_modules,
         gw_size,
         config["global_workspace"]["encoders"]["hidden_dim"],
         config["global_workspace"]["encoders"]["n_layers"],
@@ -213,16 +220,11 @@ def get_global_workspace_mods(
         latent_dim=rotation_ops_config["pixel"]["latent_dim"],
     )
 
-    # Rotation apprise directement dans l'espace GW (gw_size), à comparer à
-    # operation_rotate_pixel_mod (pixels bruts). Reste hors de operation_mod :
-    # ChainOperationModule/OperationSelectionModule fixent leur output_size sur
-    # les opérations arithmétiques (add/sub) pour la tâche de chaîne digit.
     operation_rotate_gw_mod = GwRotateOperationModule(
         gw_size=gw_size,
         hidden_size=rotation_ops_config["gw"]["hidden_size"],
         latent_dim=rotation_ops_config["gw"]["latent_dim"],
     )
-
 
     loss_mod = MyCustomGWLosses(
         gw_mod = gw_mod,
@@ -249,27 +251,5 @@ def setup_global_workspace(config: dict[str, Any], domains_configs: list[LoadedD
         operation_rotate_pixel_mod=operation_rotate_pixel_mod,
         operation_rotate_gw_mod=operation_rotate_gw_mod,
     )
-
-    return global_workspace
-
-def freeze_except_attention(model: MyGlobalWorkspace) -> None:
-    for param in model.parameters():
-        param.requires_grad = False
-
-
-def load_pretrained_global_workspace(
-    config: dict[str, Any],
-    domains_configs: list[LoadedDomainConfig],
-    checkpoint_path: str,
-    device: str = "cuda",
-) -> MyGlobalWorkspace:
-    global_workspace = setup_global_workspace(config, domains_configs)
-
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
-    global_workspace.load_state_dict(state_dict)
-
-    freeze_except_attention(global_workspace)
-    global_workspace.to(device)
 
     return global_workspace

@@ -2,7 +2,7 @@ import torch
 from lightning.pytorch.utilities import CombinedLoader
 from torch.utils.data import DataLoader
 
-from numb_project.constants import BASE
+from numb_project.constants import BASE, DIGIT_DIM
 from numb_project.data_module import MnistDataModule, MnistDataset
 
 
@@ -32,19 +32,21 @@ class TestMnistDataset:
         assert set(item.keys()) == {"image"}
         assert item["image"].shape == (1, 28, 28)
 
-    def test_digit_only_domain_returns_one_hot_digit(self) -> None:
+    def test_digit_only_domain_returns_one_hot_digit_with_upright_angle(self) -> None:
         dataset = MnistDataset(FakeMNIST(3), domain=["digit"])
         item = dataset[2]
         assert set(item.keys()) == {"digit"}
-        assert item["digit"].shape == (BASE,)
-        assert item["digit"].argmax().item() == 2
-        assert item["digit"].sum().item() == 1
+        assert item["digit"].shape == (DIGIT_DIM,)
+        assert item["digit"][:BASE].argmax().item() == 2
+        assert item["digit"][:BASE].sum().item() == 1
+        # angle 0° -> (cos, sin) = (1, 0)
+        assert torch.allclose(item["digit"][BASE:], torch.tensor([1.0, 0.0]))
 
     def test_image_and_digit_domain_returns_both(self) -> None:
         dataset = MnistDataset(FakeMNIST(3), domain=["image", "digit"])
         item = dataset[1]
         assert set(item.keys()) == {"image", "digit"}
-        assert item["digit"].argmax().item() == 1
+        assert item["digit"][:BASE].argmax().item() == 1
 
 
 class TestMnistDataModule:
