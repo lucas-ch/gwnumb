@@ -18,8 +18,6 @@ def get_config(checkpoint_path: str | None) -> dict[str, Any]:
     if checkpoint_path is None:
         config['global_workspace']['loss_coefficients']['task_loss'] = 0.0
     else:
-        config['global_workspace']['loss_coefficients']['add_loss'] = 0.0
-        config['global_workspace']['loss_coefficients']['sub_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['rotate_pixel_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['rotate_gw_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['representation_loss'] = 0.0
@@ -58,11 +56,11 @@ def get_training_objects(
     }
 
 def main() -> None:
-    run_name = 'pretrain'
+    run_name = 'rotation_test'
     checkpoint_path = None
 
-    domain_configs = get_domains_config(['image', 'digit'])
     config = get_config(checkpoint_path)
+    domain_configs = get_domains_config(['image', 'digit'], config['domains']['digit'])
     training_objects = get_training_objects(
         config, domain_configs, run_name, checkpoint_path=checkpoint_path
     )

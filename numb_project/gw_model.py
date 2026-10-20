@@ -10,8 +10,6 @@ import torch.nn.functional as F
 from numb_project.constants import BASE, DEVICE
 from numb_project.data_module import rotated_raw_image_groups
 from numb_project.domain_module import LoadedDomainConfig, load_domains
-from numb_project.operation_arithmetic_module import AddOperationModule, SubOperationModule
-from numb_project.operation_module import ChainOperationModule, OperationSelectionModule
 from numb_project.operation_rotation_module import GwRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import merge_metrics
 
@@ -21,17 +19,11 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         gw_mod: GWModule,
         selection_mod: SelectionBase,
         loss_mod: GWLosses,
-        operation_mod: nn.ModuleDict,
-        operation_selection_mod: OperationSelectionModule,
-        task_mod: ChainOperationModule,
         operation_rotate_pixel_mod: PixelRotateOperationModule,
         operation_rotate_gw_mod: GwRotateOperationModule,
         optim_lr: float = 1e-3,
     ) -> None:
         super().__init__(gw_mod, selection_mod, loss_mod, optim_lr)
-        self.operation_module = operation_mod
-        self.operation_selection_module = operation_selection_mod
-        self.task_mod = task_mod
         self.operation_rotate_pixel_module = operation_rotate_pixel_mod
         self.operation_rotate_gw_module = operation_rotate_gw_mod
 
@@ -60,15 +52,8 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
                 
         init_gw_state = self.input_to_gw(raw_group)
 
-        tasks, right_addend_value, task_targets = self.task_mod.create_chain_add_tasks(raw_group)
-        task_predictions, roll_sequence = self.task_mod.forward_chain(init_gw_state, tasks, raw_group["digit"])
-
         loss_output = self.loss_mod.step(
             batch, domain_latents, mode,
-            task_predictions=task_predictions,
-            task_targets=task_targets,
-            roll_sequence=roll_sequence,
-            right_addend_value=right_addend_value,
         )
 
         batch_size = raw_group["digit"].shape[0]
@@ -76,14 +61,6 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
             self.log(f"{mode}/{name}", metric, batch_size=batch_size, add_dataloader_idx=False)
 
         return loss_output.loss
-
-    def on_train_epoch_start(self) -> None:
-        min_temp = 0.1
-        max_temp = 1.0
-        decay_epochs = 10
-        progress = min(self.current_epoch / decay_epochs, 1.0)
-
-        self.operation_selection_module.temperature = max_temp * (min_temp / max_temp) ** progress
 
 class MyCustomGWLosses(GWLosses2Domains):
     def __init__(
@@ -94,15 +71,10 @@ class MyCustomGWLosses(GWLosses2Domains):
         loss_coefs: LossCoefs | Mapping[str, float],
         representation_loss_coefs: LossCoefs | Mapping[str, float],
         contrastive_fn: Callable[[torch.Tensor, torch.Tensor], LossOutput],
-        operation_mod: nn.ModuleDict,
-        operation_selection_mod: OperationSelectionModule,
-        task_mod: ChainOperationModule,
         operation_rotate_pixel_mod: PixelRotateOperationModule,
         operation_rotate_gw_mod: GwRotateOperationModule,
     ) -> None:
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
-        self.operation_mod = operation_mod
-        self.task_mod = task_mod
         self.operation_rotate_pixel_mod = operation_rotate_pixel_mod
         self.operation_rotate_gw_mod = operation_rotate_gw_mod
         self.representation_loss_coefs = representation_loss_coefs
@@ -119,7 +91,8 @@ class MyCustomGWLosses(GWLosses2Domains):
         with torch.no_grad():
             rotated_latent = image_mod.encode(raw_rot[single_key]["image"])
 
-        digit_latent = domain_latents[pair_key]["digit"]
+        # Le digit tourné contient le nouvel angle, on ne reprend pas celui de domain_latents
+        digit_latent = self.domain_mods["digit"].encode(raw_rot[pair_key]["digit"])
 
         latents_rot = {
             single_key: {"image": rotated_latent},
@@ -152,10 +125,6 @@ class MyCustomGWLosses(GWLosses2Domains):
         raw_data: RawDomainGroupsT,
         domain_latents: LatentsDomainGroupsT,
         mode: ModelModeT,
-        task_predictions: torch.Tensor,
-        task_targets: torch.Tensor,
-        roll_sequence: torch.Tensor,
-        right_addend_value: torch.Tensor,
     ) -> LossOutput:
         loss_config = self.loss_coefs
 
@@ -165,19 +134,11 @@ class MyCustomGWLosses(GWLosses2Domains):
         representation_loss_rotated, metrics_rotated = self.compute_representation_rotated_loss(raw_rot, latents_rot)
         metrics = merge_metrics(metrics, metrics_rotated)
 
-        add_loss = self.operation_mod["add"].loss(self.gw_mod, domain_latents)
-        sub_loss = self.operation_mod["sub"].loss(self.gw_mod, domain_latents)
-
         rotate_pixel_loss = self.operation_rotate_pixel_mod.loss(self.gw_mod, raw_data)
         rotate_pixel_loss_rotated = self.operation_rotate_pixel_mod.loss(self.gw_mod, raw_rot)
         rotate_gw_loss = self.operation_rotate_gw_mod.loss(self.gw_mod, raw_data)
         rotate_gw_loss_rotated = self.operation_rotate_gw_mod.loss(self.gw_mod, raw_rot)
 
-        task_loss_output = self.task_mod.loss(task_predictions, task_targets, roll_sequence, right_addend_value)
-
-        metrics["task_loss"] = task_loss_output.loss
-        metrics["add_loss"] = add_loss
-        metrics["sub_loss"] = sub_loss
         metrics["rotate_pixel_loss"] = rotate_pixel_loss
         metrics["rotate_pixel_loss_rotated"] = rotate_pixel_loss_rotated
         metrics["rotate_gw_loss"] = rotate_gw_loss
@@ -186,13 +147,10 @@ class MyCustomGWLosses(GWLosses2Domains):
         total_loss = (
             loss_config['representation_loss'] * representation_loss
             + loss_config['representation_loss_rotated'] * representation_loss_rotated
-            + loss_config['add_loss'] * add_loss
-            + loss_config['sub_loss'] * sub_loss
             + loss_config['rotate_pixel_loss'] * rotate_pixel_loss
             + loss_config['rotate_pixel_loss_rotated'] * rotate_pixel_loss_rotated
             + loss_config['rotate_gw_loss'] * rotate_gw_loss
             + loss_config['rotate_gw_loss_rotated'] * rotate_gw_loss_rotated
-            + loss_config['task_loss'] * task_loss_output.loss
         )
 
         return LossOutput(total_loss, metrics)
@@ -200,7 +158,7 @@ class MyCustomGWLosses(GWLosses2Domains):
 def get_global_workspace_mods(
         config: dict[str, Any],
         domains_configs: list[LoadedDomainConfig],
-        ) -> tuple[GWModule, SingleDomainSelection, nn.ModuleDict, OperationSelectionModule, ChainOperationModule, MyCustomGWLosses, PixelRotateOperationModule, GwRotateOperationModule]:
+        ) -> tuple[GWModule, SingleDomainSelection, nn.ModuleDict, MyCustomGWLosses, PixelRotateOperationModule, GwRotateOperationModule]:
     selection_mod = SingleDomainSelection()
     contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
     gw_size = config["global_workspace"]["latent_dim"]
@@ -222,14 +180,6 @@ def get_global_workspace_mods(
         gw_decoders=gw_decoders,
     )
 
-    operation_add_mod = AddOperationModule(gw_size, config["global_workspace"]["encoders"]["hidden_dim"]["operation"], gw_size)
-    operation_sub_mod = SubOperationModule(gw_size, config["global_workspace"]["encoders"]["hidden_dim"]["operation"], gw_size)
-
-    operation_mod = nn.ModuleDict({
-        "add": operation_add_mod,
-        "sub": operation_sub_mod,
-    })
-
     rotation_ops_config = config["global_workspace"]["rotation_operations"]
 
     operation_rotate_pixel_mod = PixelRotateOperationModule(
@@ -246,9 +196,6 @@ def get_global_workspace_mods(
         latent_dim=rotation_ops_config["gw"]["latent_dim"],
     )
 
-    operation_selection_mod = OperationSelectionModule(input_size=gw_size, output_size=1 + len(operation_mod), hidden_size=128, batch_size=batch_size, device=DEVICE)
-
-    task_mod = ChainOperationModule(20, 0, 9, BASE, gw_mod, operation_selection_mod, operation_mod)
 
     loss_mod = MyCustomGWLosses(
         gw_mod = gw_mod,
@@ -256,28 +203,22 @@ def get_global_workspace_mods(
         domain_mods=domain_modules,
         representation_loss_coefs=config["global_workspace"]["representation_loss_coefficients"],
         contrastive_fn=contrastive_fn,
-        operation_mod = operation_mod,
-        operation_selection_mod=operation_selection_mod,
-        task_mod=task_mod,
         operation_rotate_pixel_mod=operation_rotate_pixel_mod,
         operation_rotate_gw_mod=operation_rotate_gw_mod,
         loss_coefs = config["global_workspace"]["loss_coefficients"],
     )
 
-    return gw_mod, selection_mod, operation_mod, operation_selection_mod, task_mod, loss_mod, operation_rotate_pixel_mod, operation_rotate_gw_mod
+    return gw_mod, selection_mod, loss_mod, operation_rotate_pixel_mod, operation_rotate_gw_mod
 
 
 def setup_global_workspace(config: dict[str, Any], domains_configs: list[LoadedDomainConfig]) -> MyGlobalWorkspace:
-    gw_mod, selection_mod, operation_mod, operation_selection_mod, task_mod, loss_mod, operation_rotate_pixel_mod, operation_rotate_gw_mod = get_global_workspace_mods(config, domains_configs)
+    gw_mod, selection_mod, loss_mod, operation_rotate_pixel_mod, operation_rotate_gw_mod = get_global_workspace_mods(config, domains_configs)
 
     global_workspace = MyGlobalWorkspace(
         gw_mod=gw_mod,
         selection_mod=selection_mod,
         loss_mod=loss_mod,
         optim_lr=config["training"]["optim"]["lr"],
-        operation_mod= operation_mod,
-        operation_selection_mod=operation_selection_mod,
-        task_mod=task_mod,
         operation_rotate_pixel_mod=operation_rotate_pixel_mod,
         operation_rotate_gw_mod=operation_rotate_gw_mod,
     )
@@ -288,8 +229,6 @@ def freeze_except_attention(model: MyGlobalWorkspace) -> None:
     for param in model.parameters():
         param.requires_grad = False
 
-    for param in model.operation_selection_module.parameters():
-        param.requires_grad = True
 
 def load_pretrained_global_workspace(
     config: dict[str, Any],

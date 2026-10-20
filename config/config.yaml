@@ -1,3 +1,9 @@
+domains:
+    # Domaine digit = one-hot du chiffre + (cos, sin) de l'angle de l'image.
+    # Poids de la MSE sur l'angle par rapport à la MSE sur le chiffre.
+    digit:
+        angle_loss_weight: 1.0
+
 global_workspace:
     latent_dim: 10
 
@@ -8,14 +14,11 @@ global_workspace:
         translations: 1.0
     loss_coefficients:
         representation_loss: 1.0
-        representation_loss_rotated: 0.2
-        add_loss: 1.0
-        sub_loss: 1.0
+        representation_loss_rotated: 1.0
         rotate_pixel_loss: 1.0
-        rotate_pixel_loss_rotated: 0.2
+        rotate_pixel_loss_rotated: 1.0
         rotate_gw_loss: 1.0
-        rotate_gw_loss_rotated: 0.2
-        task_loss: 1.0
+        rotate_gw_loss_rotated: 1.0
     encoders:
         hidden_dim:
             image: 256
@@ -46,6 +49,6 @@ training:
     optim:
         lr: 0.001
 
-    max_steps: 1000
+    max_steps: 10000
     devices: 1
     batch_size: 512

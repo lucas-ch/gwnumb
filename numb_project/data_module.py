@@ -28,6 +28,10 @@ def rotate_image_batch(images: torch.Tensor, angles_deg: torch.Tensor) -> torch.
     grid = F.affine_grid(rotation_matrices, list(images.shape), align_corners=False)
     return F.grid_sample(images, grid, align_corners=False)
 
+def angle_to_cos_sin(angle_deg: torch.Tensor) -> torch.Tensor:
+    theta = angle_deg * torch.pi / 180
+    return torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
+
 def rotated_raw_image_groups(raw_data: RawDomainGroupsT) -> RawDomainGroupsT:
     pair_key = frozenset({"digit", "image"})
     image = raw_data[pair_key]["image"]
@@ -35,11 +39,13 @@ def rotated_raw_image_groups(raw_data: RawDomainGroupsT) -> RawDomainGroupsT:
 
     angle_deg = torch.rand(image.shape[0], device=image.device) * 360.0
     rotated_image = rotate_image_batch(image, angle_deg)
+    # Le digit porte l'angle de l'image : on remplace (cos, sin) par le nouvel angle
+    rotated_digit = torch.cat([digit_raw[:, :BASE], angle_to_cos_sin(angle_deg)], dim=-1)
 
     single_key = frozenset({"image"})
     return {
         single_key: {"image": rotated_image},
-        pair_key: {"image": rotated_image, "digit": digit_raw},
+        pair_key: {"image": rotated_image, "digit": rotated_digit},
     }
 
 class MnistDataset(Dataset):
@@ -54,10 +60,13 @@ class MnistDataset(Dataset):
         image = self.mnist_dataset[idx][0]
         digit = self.mnist_dataset[idx][1]
         digit_one_hot = F.one_hot(torch.tensor(digit), num_classes=BASE).float()
+        # Angle de l'image : 0° quand le digit est apparié à l'image (droite),
+        # aléatoire quand le digit est seul, pour couvrir tous les angles
+        angle_deg = torch.tensor(0.0) if "image" in self.domain else torch.rand(()) * 360.0
 
         available = {
             "image": image,
-            "digit": digit_one_hot,
+            "digit": torch.cat([digit_one_hot, angle_to_cos_sin(angle_deg)]),
         }
 
         return {key: available[key] for key in self.domain}

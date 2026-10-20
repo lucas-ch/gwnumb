@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from numb_project.mnist_vae import VAE
 from numb_project.utils import get_from_dict_or_val
-from numb_project.constants import BASE, VAE_CHECKPOINT_FILE
+from numb_project.constants import BASE, DIGIT_DIM, VAE_CHECKPOINT_FILE
 
 
 class IdentityDomain(DomainModule):
@@ -40,6 +40,23 @@ class IdentityDomain(DomainModule):
     
     def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, raw_target: Any) -> LossOutput:
         return LossOutput(F.mse_loss(pred, target, reduction="mean"))
+
+class DigitAngleDomain(IdentityDomain):
+    """Domaine digit : one-hot du chiffre (BASE dimensions) suivi de (cos, sin)
+    de l'angle de l'image. Les deux parties ont chacune leur MSE, pour que
+    l'angle (2 dimensions sur 12) ne soit pas noyé dans la moyenne."""
+
+    def __init__(self, angle_loss_weight: float = 1.0) -> None:
+        super().__init__(DIGIT_DIM)
+        self.angle_loss_weight = angle_loss_weight
+
+    def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, raw_target: Any) -> LossOutput:
+        digit_loss = F.mse_loss(pred[:, :BASE], target[:, :BASE], reduction="mean")
+        angle_loss = F.mse_loss(pred[:, BASE:], target[:, BASE:], reduction="mean")
+        return LossOutput(
+            digit_loss + self.angle_loss_weight * angle_loss,
+            {"digit": digit_loss, "angle": angle_loss},
+        )
 
 class MNISTDomain(DomainModule):
     def __init__(self, vae: VAE) -> None:
@@ -75,12 +92,12 @@ class LoadedDomainConfig(BaseModel):
     domain_type: str
     args: Mapping[str, Any] = {}
 
-def get_domains_config(domains: list[str]) -> list[LoadedDomainConfig]:
+def get_domains_config(domains: list[str], digit_args: Mapping[str, Any] | None = None) -> list[LoadedDomainConfig]:
     domains_config = []
     if 'image' in domains:
         domains_config.append(LoadedDomainConfig(domain_type="image", checkpoint_path=VAE_CHECKPOINT_FILE))
     if 'digit' in domains:
-        domains_config.append(LoadedDomainConfig(domain_type="digit"))
+        domains_config.append(LoadedDomainConfig(domain_type="digit", args=digit_args or {}))
 
     return domains_config
 
@@ -96,7 +113,7 @@ def load_pretrained_module(domain: LoadedDomainConfig) -> DomainModule:
             module = MNISTDomain(vae)
 
         case "digit":
-            module = IdentityDomain(BASE)
+            module = DigitAngleDomain(**domain.args)
     return module
 
 def load_domain(
