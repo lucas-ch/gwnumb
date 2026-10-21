@@ -56,7 +56,7 @@ def get_training_objects(
     }
 
 def main() -> None:
-    run_name = 'rotation_test3'
+    run_name = 'rotation'
     checkpoint_path = None
 
     config = get_config(checkpoint_path)

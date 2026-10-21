@@ -17,12 +17,6 @@ def get_from_dict_or_val(
     assert key in val, f"{key} should be defined in {log}."
     return val[key]
 
-def merge_metrics(metrics: dict[str, torch.Tensor], other_metrics: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    merged = dict(metrics)
-    for key, value in other_metrics.items():
-        merged[key] = merged[key] + value if key in merged else value
-    return merged
-
 def rotate_images(images: torch.Tensor, angles_deg: torch.Tensor) -> torch.Tensor:
     """Rotation exacte (non apprise) d'un batch d'images (B, C, H, W), d'un angle
     par image, sur le device des images (affine_grid + grid_sample bilinéaire).
@@ -45,3 +39,8 @@ def angle_to_cos_sin(angle_deg: torch.Tensor) -> torch.Tensor:
     """Encode un angle en (cos, sin), sans discontinuité entre 359° et 0°."""
     theta = angle_deg * torch.pi / 180
     return torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
+
+def cos_sin_to_angle(cos_sin: torch.Tensor) -> torch.Tensor:
+    """Inverse de angle_to_cos_sin : angle en degrés dans [0, 360[ (le vecteur
+    (cos, sin) n'a pas besoin d'être de norme 1)."""
+    return torch.rad2deg(torch.atan2(cos_sin[..., 1], cos_sin[..., 0])) % 360

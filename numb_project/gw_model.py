@@ -11,7 +11,7 @@ from numb_project.constants import BASE, DEVICE
 from numb_project.domain_module import LoadedDomainConfig, load_domain_modules
 from numb_project.operation_rotation_module import GwRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import angle_to_cos_sin, rotate_images
-from numb_project.utils import get_from_dict_or_val, merge_metrics
+from numb_project.utils import get_from_dict_or_val
 
 class MyGlobalWorkspace(GlobalWorkspaceBase):
     def __init__(
@@ -73,7 +73,6 @@ class MyCustomGWLosses(GWLosses2Domains):
     def _rotated_batch(
         self, raw_data: RawDomainGroupsT
     ) -> tuple[LatentsDomainGroupsT, RawDomainGroupsT]:
-        """Batch tourné (cf make_rotated_gw_batch) et ses latents de domaines."""
         raw_rot = make_rotated_gw_batch(raw_data)
         with torch.no_grad():
             latents_rot = {
@@ -84,23 +83,22 @@ class MyCustomGWLosses(GWLosses2Domains):
 
     def compute_representation_loss(
         self, raw_data: RawDomainGroupsT, domain_latents: LatentsDomainGroupsT
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        metrics = {}
-        metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
-        metrics.update(self.cycle_loss(domain_latents, raw_data))
-        metrics.update(self.translation_loss(domain_latents, raw_data))
-        metrics.update(self.contrastive_loss(domain_latents))
+    ) -> torch.Tensor:
+        losses = {
+            **self.demi_cycle_loss(domain_latents, raw_data),
+            **self.cycle_loss(domain_latents, raw_data),
+            **self.translation_loss(domain_latents, raw_data),
+            **self.contrastive_loss(domain_latents),
+        }
+        return combine_loss(losses, self.representation_loss_coefs)
 
-        representation_loss = combine_loss(metrics, self.representation_loss_coefs)
-
-        return representation_loss, metrics
-
-    def compute_representation_rotated_loss(
-        self,
-        raw_rot: RawDomainGroupsT,
-        latents_rot: LatentsDomainGroupsT,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        return self.compute_representation_loss(raw_rot, latents_rot)
+    def _losses(self, raw_data: RawDomainGroupsT, domain_latents: LatentsDomainGroupsT) -> dict[str, torch.Tensor]:
+        """Losses d'une version du batch, nommées comme dans `loss_coefficients`."""
+        return {
+            "representation_loss": self.compute_representation_loss(raw_data, domain_latents),
+            "rotate_pixel_loss": self.operation_rotate_pixel_mod.loss(self.gw_mod, raw_data),
+            "rotate_gw_loss": self.operation_rotate_gw_mod.loss(self.gw_mod, raw_data),
+        }
 
     def step(
         self,
@@ -108,42 +106,13 @@ class MyCustomGWLosses(GWLosses2Domains):
         domain_latents: LatentsDomainGroupsT,
         mode: ModelModeT,
     ) -> LossOutput:
-        loss_config = self.loss_coefs
-
         latents_rot, raw_rot = self._rotated_batch(raw_data)
 
-        representation_loss, metrics = self.compute_representation_loss(raw_data, domain_latents)
-        representation_loss_rotated, metrics_rotated = self.compute_representation_rotated_loss(raw_rot, latents_rot)
-        metrics = merge_metrics(metrics, metrics_rotated)
+        losses = self._losses(raw_data, domain_latents)
+        losses |= {f"{name}_rotated": loss for name, loss in self._losses(raw_rot, latents_rot).items()}
 
-        rotate_pixel_loss = self.operation_rotate_pixel_mod.loss(self.gw_mod, raw_data)
-        rotate_pixel_loss_rotated = self.operation_rotate_pixel_mod.loss(self.gw_mod, raw_rot)
-        rotate_gw_loss = self.operation_rotate_gw_mod.loss(self.gw_mod, raw_data)
-        rotate_gw_loss_rotated = self.operation_rotate_gw_mod.loss(self.gw_mod, raw_rot)
-
-        metrics["rotate_pixel_loss"] = rotate_pixel_loss
-        metrics["rotate_pixel_loss_rotated"] = rotate_pixel_loss_rotated
-        metrics["rotate_gw_loss"] = rotate_gw_loss
-        metrics["rotate_gw_loss_rotated"] = rotate_gw_loss_rotated
-        for name, value in self.operation_rotate_pixel_mod.metrics(self.gw_mod, raw_data).items():
-            metrics[f"rotate_pixel_{name}"] = value
-        for name, value in self.operation_rotate_pixel_mod.metrics(self.gw_mod, raw_rot).items():
-            metrics[f"rotate_pixel_{name}_rotated"] = value
-        for name, value in self.operation_rotate_gw_mod.metrics(self.gw_mod, raw_data).items():
-            metrics[f"rotate_gw_{name}"] = value
-        for name, value in self.operation_rotate_gw_mod.metrics(self.gw_mod, raw_rot).items():
-            metrics[f"rotate_gw_{name}_rotated"] = value
-
-        total_loss = (
-            loss_config['representation_loss'] * representation_loss
-            + loss_config['representation_loss_rotated'] * representation_loss_rotated
-            + loss_config['rotate_pixel_loss'] * rotate_pixel_loss
-            + loss_config['rotate_pixel_loss_rotated'] * rotate_pixel_loss_rotated
-            + loss_config['rotate_gw_loss'] * rotate_gw_loss
-            + loss_config['rotate_gw_loss_rotated'] * rotate_gw_loss_rotated
-        )
-
-        return LossOutput(total_loss, metrics)
+        total_loss = sum(self.loss_coefs[name] * loss for name, loss in losses.items())
+        return LossOutput(total_loss, losses)
 
 def make_rotated_gw_batch(raw_data: RawDomainGroupsT) -> RawDomainGroupsT:
     """Version tournée d'un batch du GW (format shimmer : groupe de domaines ->
@@ -232,7 +201,6 @@ def get_global_workspace_mods(
         latent_dim=rotation_ops_config["gw"]["latent_dim"],
         degrees=rotation_ops_config["degrees"],
         n_steps=rotation_ops_config["n_steps"],
-        residual=rotation_ops_config["gw"]["residual"],
     )
 
     loss_mod = MyCustomGWLosses(

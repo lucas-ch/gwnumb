@@ -52,10 +52,7 @@ class DigitAngleDomain(IdentityDomain):
     def compute_loss(self, pred: torch.Tensor, target: torch.Tensor, raw_target: Any) -> LossOutput:
         digit_loss = F.mse_loss(pred[:, :BASE], target[:, :BASE], reduction="mean")
         angle_loss = F.mse_loss(pred[:, BASE:], target[:, BASE:], reduction="mean")
-        return LossOutput(
-            digit_loss + self.angle_loss_weight * angle_loss,
-            {"digit": digit_loss, "angle": angle_loss},
-        )
+        return LossOutput(digit_loss + self.angle_loss_weight * angle_loss)
 
 class MNISTDomain(DomainModule):
     def __init__(self, vae: VAE) -> None:

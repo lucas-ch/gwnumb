@@ -3,12 +3,10 @@ from torch import nn
 import torch
 import torch.nn.functional as F
 
-from numb_project.constants import BASE
-from numb_project.utils import angle_to_cos_sin, rotate_images
+from numb_project.utils import rotate_images
 
 
 def image_to_gw_state(gw_mod: GWModule, image: torch.Tensor) -> torch.Tensor:
-    # État GW réel d'une image seule : tanh de l'encodage GW (cf GWModule.fuse)
     image_latent = gw_mod.domain_mods["image"].encode(image)
     return gw_mod.fusion_activation_fn(gw_mod.gw_encoders["image"](image_latent))
 
@@ -36,6 +34,7 @@ class PixelRotateOperationModule(nn.Module):
     ):
         super().__init__()
         c1, c2 = channels
+        self.channels = channels
         self.degrees = degrees
         self.n_steps = n_steps
 
@@ -55,7 +54,6 @@ class PixelRotateOperationModule(nn.Module):
             nn.ConvTranspose2d(c1, 1, kernel_size=4, stride=2, padding=1),   # 14->28
             nn.Sigmoid(),
         )
-        self.channels = channels
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.enc(x)
@@ -69,9 +67,6 @@ class PixelRotateOperationModule(nn.Module):
         gw_mod: GWModuleBase,
         raw_data: RawDomainGroupsT,
     ) -> torch.Tensor:
-        # Le module est appliqué n_steps fois d'affilée : chaque étape k est
-        # comparée à l'image tournée de k x degrees, et le gradient traverse
-        # toute la chaîne pour que le module apprenne à corriger sa propre dérive.
         image = raw_data[frozenset({"digit", "image"})]['image']
 
         pred = image
@@ -82,18 +77,10 @@ class PixelRotateOperationModule(nn.Module):
 
         return torch.stack(losses).mean()
 
+
 class GwRotateOperationModule(nn.Module):
     """Rotation apprise directement dans l'espace du global workspace (10D par
-    défaut), pour un angle fixe.
-
-    Avec `residual`, le MLP ne prédit que le déplacement de l'état GW, ajouté
-    avant le tanh : sortie = tanh(atanh(x) + MLP(x)). Ce qui ne doit pas changer
-    avec la rotation est recopié tel quel au lieu d'être reconstruit, et la
-    dernière couche initialisée à zéro fait démarrer le module à l'identité.
-    Sans `residual` : sortie = tanh(MLP(x))."""
-
-    # atanh(±1) est infini : les états GW (sortie de tanh) sont bornés juste avant
-    ATANH_CLAMP = 0.999
+    défaut), pour un angle fixe."""
 
     def __init__(
         self,
@@ -102,12 +89,10 @@ class GwRotateOperationModule(nn.Module):
         latent_dim: int = 64,
         degrees: float = 20.0,
         n_steps: int = 1,
-        residual: bool = False,
     ):
         super().__init__()
         self.degrees = degrees
         self.n_steps = n_steps
-        self.residual = residual
 
         self.encoder = nn.Sequential(
             nn.Linear(gw_size, hidden_size),
@@ -124,14 +109,9 @@ class GwRotateOperationModule(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_size, gw_size),
         )
-        if residual:
-            nn.init.zeros_(self.decoder[-1].weight)
-            nn.init.zeros_(self.decoder[-1].bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.decoder(self.encoder(x))
-        if self.residual:
-            out = torch.atanh(x.clamp(-self.ATANH_CLAMP, self.ATANH_CLAMP)) + out
         return torch.tanh(out)
 
     def loss(
@@ -139,9 +119,6 @@ class GwRotateOperationModule(nn.Module):
         gw_mod: GWModule,
         raw_data: RawDomainGroupsT,
     ) -> torch.Tensor:
-        # Même principe que PixelRotateOperationModule.loss : n_steps rotations
-        # enchaînées dans l'espace GW, chaque étape comparée à l'état GW de
-        # l'image tournée de k x degrees.
         image = raw_data[frozenset({"digit", "image"})]['image']
 
         with torch.no_grad():

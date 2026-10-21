@@ -68,7 +68,7 @@ ROTATION_OPERATIONS_CONFIG = {
     "degrees": 30.0,
     "n_steps": 2,
     "pixel": {"latent_dim": HIDDEN_DIM},
-    "gw": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM, "residual": True},
+    "gw": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
 }
 
 
@@ -176,27 +176,34 @@ class TestMyCustomGWLosses:
         assert loss_mod.operation_rotate_gw_mod is workspace.operation_rotate_gw_module
         assert loss_mod.representation_loss_coefs == REPRESENTATION_LOSS_COEFS
 
-    def test_compute_representation_loss_returns_scalar_and_metrics(self, workspace_and_batch) -> None:
+    def test_compute_representation_loss_returns_finite_scalar(self, workspace_and_batch) -> None:
         workspace, batch = workspace_and_batch
         domain_latents = workspace.encode_domains(batch)
 
-        loss, metrics = workspace.loss_mod.compute_representation_loss(batch, domain_latents)
+        loss = workspace.loss_mod.compute_representation_loss(batch, domain_latents)
 
         assert loss.ndim == 0
         assert torch.isfinite(loss)
-        assert "demi_cycles" in metrics
 
-    def test_step_combines_representation_and_rotation_losses(self, workspace_and_batch) -> None:
+    def test_step_logs_the_configured_losses(self, workspace_and_batch) -> None:
         workspace, batch = workspace_and_batch
         domain_latents = workspace.encode_domains(batch)
 
         loss_output = workspace.loss_mod.step(batch, domain_latents, "train")
 
         assert torch.isfinite(loss_output.loss)
-        for name in ["rotate_pixel_loss", "rotate_pixel_loss_rotated", "rotate_gw_loss", "rotate_gw_loss_rotated",
-                     "rotate_gw_pixel_mse", "rotate_gw_angle_error_deg_rotated",
-                     "rotate_gw_digit_accuracy", "rotate_pixel_digit_accuracy", "rotate_pixel_angle_error_deg_rotated"]:
-            assert name in loss_output.metrics
+        assert set(loss_output.metrics) == set(LOSS_COEFS)
+
+    def test_step_total_loss_is_weighted_sum_of_configured_losses(self, workspace_and_batch) -> None:
+        workspace, batch = workspace_and_batch
+        workspace.loss_mod.loss_coefs = {name: 0.5 + i for i, name in enumerate(LOSS_COEFS)}
+        domain_latents = workspace.encode_domains(batch)
+
+        torch.manual_seed(0)  # même angles pour le batch tourné dans les deux calculs
+        loss_output = workspace.loss_mod.step(batch, domain_latents, "train")
+
+        expected = sum(coef * loss_output.metrics[name] for name, coef in workspace.loss_mod.loss_coefs.items())
+        assert torch.isclose(loss_output.loss, expected)
 
 
 class TestMakeRotatedGwBatch:
@@ -259,7 +266,6 @@ class TestModuleFunctions:
         assert isinstance(operation_rotate_gw_mod, GwRotateOperationModule)
         assert operation_rotate_pixel_mod.degrees == operation_rotate_gw_mod.degrees == 30.0
         assert operation_rotate_pixel_mod.n_steps == operation_rotate_gw_mod.n_steps == 2
-        assert operation_rotate_gw_mod.residual
         assert set(gw_mod.domain_mods.keys()) == {"digit"}
         assert set(gw_mod.gw_encoders.keys()) == {"digit"}
         # les domaines doivent être des sous-modules du GW (state_dict, .to(device))

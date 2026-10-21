@@ -81,6 +81,4 @@ def test_digit_angle_domain_loss_weights_digit_and_angle_parts_separately() -> N
 
     digit_loss = F.mse_loss(pred[:, :BASE], target[:, :BASE])
     angle_loss = F.mse_loss(pred[:, BASE:], target[:, BASE:])
-    assert torch.isclose(loss.metrics["digit"], digit_loss)
-    assert torch.isclose(loss.metrics["angle"], angle_loss)
     assert torch.isclose(loss.loss, digit_loss + 2.0 * angle_loss)
