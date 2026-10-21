@@ -78,24 +78,32 @@ class PixelRotateOperationModule(nn.Module):
         return torch.stack(losses).mean()
 
 
-class GwRotateOperationModule(nn.Module):
-    """Rotation apprise directement dans l'espace du global workspace (10D par
-    défaut), pour un angle fixe."""
+class LatentRotateOperationModule(nn.Module):
+    """Rotation apprise dans un espace latent, pour un angle fixe : MLP encodeur
+    -> couche intermédiaire de taille `latent_dim` -> décodeur. L'espace est
+    choisi par `space` :
+     - "gw"  : état du global workspace (tanh de l'encodage GW), dans [-1, 1] ;
+     - "vae" : latent du VAE (mu), non borné, pour comparer avec une rotation
+       faite hors du GW.
+    Entraînement identique dans les deux cas, seul l'encodage des images change."""
 
     def __init__(
         self,
-        gw_size: int = 10,
+        space: str,
+        size: int,
         hidden_size: int = 128,
         latent_dim: int = 64,
         degrees: float = 20.0,
         n_steps: int = 1,
     ):
         super().__init__()
+        assert space in ("gw", "vae"), f"espace inconnu : {space}"
+        self.space = space
         self.degrees = degrees
         self.n_steps = n_steps
 
         self.encoder = nn.Sequential(
-            nn.Linear(gw_size, hidden_size),
+            nn.Linear(size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
@@ -107,28 +115,37 @@ class GwRotateOperationModule(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, gw_size),
+            nn.Linear(hidden_size, size),
         )
+
+    def encode(self, gw_mod: GWModule, image: torch.Tensor) -> torch.Tensor:
+        """Image -> point de l'espace où se fait la rotation."""
+        if self.space == "gw":
+            return image_to_gw_state(gw_mod, image)
+        return gw_mod.domain_mods["image"].encode(image)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.decoder(self.encoder(x))
-        return torch.tanh(out)
+        return torch.tanh(out) if self.space == "gw" else out
 
     def loss(
         self,
         gw_mod: GWModule,
         raw_data: RawDomainGroupsT,
     ) -> torch.Tensor:
+        # Même principe que PixelRotateOperationModule.loss : n_steps rotations
+        # enchaînées dans l'espace latent, chaque étape comparée à l'encodage
+        # de l'image tournée de k x degrees.
         image = raw_data[frozenset({"digit", "image"})]['image']
 
         with torch.no_grad():
-            gw_state = image_to_gw_state(gw_mod, image)
+            state = self.encode(gw_mod, image)
             targets = [
-                image_to_gw_state(gw_mod, rotated)
+                self.encode(gw_mod, rotated)
                 for rotated in chained_rotation_targets(image, self.degrees, self.n_steps)
             ]
 
-        pred = gw_state
+        pred = state
         losses = []
         for target in targets:
             pred = self(pred)

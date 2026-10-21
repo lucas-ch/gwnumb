@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from numb_project.constants import BASE, DEVICE
 from numb_project.domain_module import LoadedDomainConfig, load_domain_modules
-from numb_project.operation_rotation_module import GwRotateOperationModule, PixelRotateOperationModule
+from numb_project.operation_rotation_module import LatentRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import angle_to_cos_sin, rotate_images
 from numb_project.utils import get_from_dict_or_val
 
@@ -19,13 +19,11 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         gw_mod: GWModule,
         selection_mod: SelectionBase,
         loss_mod: GWLosses,
-        operation_rotate_pixel_mod: PixelRotateOperationModule,
-        operation_rotate_gw_mod: GwRotateOperationModule,
+        rotation_mods: nn.ModuleDict,
         optim_lr: float = 1e-3,
     ) -> None:
         super().__init__(gw_mod, selection_mod, loss_mod, optim_lr)
-        self.operation_rotate_pixel_module = operation_rotate_pixel_mod
-        self.operation_rotate_gw_module = operation_rotate_gw_mod
+        self.rotation_mods = rotation_mods
 
     def configure_optimizers(self) -> dict[str, AdamW]:
         optimizer = AdamW(
@@ -62,12 +60,10 @@ class MyCustomGWLosses(GWLosses2Domains):
         loss_coefs: LossCoefs | Mapping[str, float],
         representation_loss_coefs: LossCoefs | Mapping[str, float],
         contrastive_fn: Callable[[torch.Tensor, torch.Tensor], LossOutput],
-        operation_rotate_pixel_mod: PixelRotateOperationModule,
-        operation_rotate_gw_mod: GwRotateOperationModule,
+        rotation_mods: nn.ModuleDict,
     ) -> None:
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
-        self.operation_rotate_pixel_mod = operation_rotate_pixel_mod
-        self.operation_rotate_gw_mod = operation_rotate_gw_mod
+        self.rotation_mods = rotation_mods
         self.representation_loss_coefs = representation_loss_coefs
 
     def _rotated_batch(
@@ -96,8 +92,7 @@ class MyCustomGWLosses(GWLosses2Domains):
         """Losses d'une version du batch, nommées comme dans `loss_coefficients`."""
         return {
             "representation_loss": self.compute_representation_loss(raw_data, domain_latents),
-            "rotate_pixel_loss": self.operation_rotate_pixel_mod.loss(self.gw_mod, raw_data),
-            "rotate_gw_loss": self.operation_rotate_gw_mod.loss(self.gw_mod, raw_data),
+            **{f"rotate_{name}_loss": mod.loss(self.gw_mod, raw_data) for name, mod in self.rotation_mods.items()},
         }
 
     def step(
@@ -162,10 +157,21 @@ def build_gw_encoders_decoders(
         )
     return nn.ModuleDict(gw_encoders), nn.ModuleDict(gw_decoders)
 
+def build_rotation_modules(rotation_config: dict[str, Any], gw_size: int, vae_size: int) -> nn.ModuleDict:
+    """Une rotation apprise par espace : pixels, latent du VAE, état du GW."""
+    common = {"degrees": rotation_config["degrees"], "n_steps": rotation_config["n_steps"]}
+    return nn.ModuleDict({
+        "pixel": PixelRotateOperationModule(latent_dim=rotation_config["pixel"]["latent_dim"], **common),
+        "vae": LatentRotateOperationModule("vae", vae_size, rotation_config["vae"]["hidden_size"],
+                                           rotation_config["vae"]["latent_dim"], **common),
+        "gw": LatentRotateOperationModule("gw", gw_size, rotation_config["gw"]["hidden_size"],
+                                          rotation_config["gw"]["latent_dim"], **common),
+    })
+
 def get_global_workspace_mods(
         config: dict[str, Any],
         domains_configs: list[LoadedDomainConfig],
-        ) -> tuple[GWModule, SingleDomainSelection, nn.ModuleDict, MyCustomGWLosses, PixelRotateOperationModule, GwRotateOperationModule]:
+        ) -> tuple[GWModule, SingleDomainSelection, MyCustomGWLosses, nn.ModuleDict]:
     selection_mod = SingleDomainSelection()
     contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
     gw_size = config["global_workspace"]["latent_dim"]
@@ -187,20 +193,8 @@ def get_global_workspace_mods(
         gw_decoders=gw_decoders,
     )
 
-    rotation_ops_config = config["global_workspace"]["rotation_operations"]
-
-    operation_rotate_pixel_mod = PixelRotateOperationModule(
-        latent_dim=rotation_ops_config["pixel"]["latent_dim"],
-        degrees=rotation_ops_config["degrees"],
-        n_steps=rotation_ops_config["n_steps"],
-    )
-
-    operation_rotate_gw_mod = GwRotateOperationModule(
-        gw_size=gw_size,
-        hidden_size=rotation_ops_config["gw"]["hidden_size"],
-        latent_dim=rotation_ops_config["gw"]["latent_dim"],
-        degrees=rotation_ops_config["degrees"],
-        n_steps=rotation_ops_config["n_steps"],
+    rotation_mods = build_rotation_modules(
+        config["global_workspace"]["rotation_operations"], gw_size, domain_modules["image"].latent_dim
     )
 
     loss_mod = MyCustomGWLosses(
@@ -209,24 +203,22 @@ def get_global_workspace_mods(
         domain_mods=domain_modules,
         representation_loss_coefs=config["global_workspace"]["representation_loss_coefficients"],
         contrastive_fn=contrastive_fn,
-        operation_rotate_pixel_mod=operation_rotate_pixel_mod,
-        operation_rotate_gw_mod=operation_rotate_gw_mod,
+        rotation_mods=rotation_mods,
         loss_coefs = config["global_workspace"]["loss_coefficients"],
     )
 
-    return gw_mod, selection_mod, loss_mod, operation_rotate_pixel_mod, operation_rotate_gw_mod
+    return gw_mod, selection_mod, loss_mod, rotation_mods
 
 
 def setup_global_workspace(config: dict[str, Any], domains_configs: list[LoadedDomainConfig]) -> MyGlobalWorkspace:
-    gw_mod, selection_mod, loss_mod, operation_rotate_pixel_mod, operation_rotate_gw_mod = get_global_workspace_mods(config, domains_configs)
+    gw_mod, selection_mod, loss_mod, rotation_mods = get_global_workspace_mods(config, domains_configs)
 
     global_workspace = MyGlobalWorkspace(
         gw_mod=gw_mod,
         selection_mod=selection_mod,
         loss_mod=loss_mod,
         optim_lr=config["training"]["optim"]["lr"],
-        operation_rotate_pixel_mod=operation_rotate_pixel_mod,
-        operation_rotate_gw_mod=operation_rotate_gw_mod,
+        rotation_mods=rotation_mods,
     )
 
     return global_workspace

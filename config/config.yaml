@@ -17,6 +17,8 @@ global_workspace:
         representation_loss_rotated: 1.0
         rotate_pixel_loss: 1.0
         rotate_pixel_loss_rotated: 1.0
+        rotate_vae_loss: 1.0
+        rotate_vae_loss_rotated: 1.0
         rotate_gw_loss: 1.0
         rotate_gw_loss_rotated: 1.0
     encoders:
@@ -30,9 +32,11 @@ global_workspace:
     # une variante par espace, pour comparer laquelle apprend le mieux :
     #  - pixel : directement sur l'image (CNN), latent_dim = largeur du goulot
     #    d'étranglement entre l'encodeur et le décodeur convolutifs.
-    #  - gw    : directement dans l'espace du global workspace (MLP), avec
-    #    hidden_size = largeur des couches denses et latent_dim = taille de la
-    #    couche intermédiaire (goulot seulement si < latent_dim du GW).
+    #  - vae   : dans le latent du VAE (mu, 20D), MLP ;
+    #  - gw    : dans l'espace du global workspace (10D), même MLP.
+    #    Pour vae et gw : hidden_size = largeur des couches denses et
+    #    latent_dim = taille de la couche intermédiaire ; garder les mêmes
+    #    valeurs pour que seul l'espace diffère.
     # degrees : angle de la rotation apprise, commun aux deux variantes.
     # n_steps : nombre de rotations enchaînées dans la loss (1 = une seule
     #    rotation) ; la loss est la moyenne sur les étapes 1..n_steps.
@@ -41,6 +45,9 @@ global_workspace:
         n_steps: 4
         pixel:
             latent_dim: 64
+        vae:
+            hidden_size: 64
+            latent_dim: 32
         gw:
             hidden_size: 64
             latent_dim: 32
