@@ -44,6 +44,8 @@ global_workspace:
         gw:
             hidden_size: 64
             latent_dim: 32
+            # true : le MLP prédit seulement le déplacement de l'état GW
+            residual: true
 
     decoders:
         hidden_dim:

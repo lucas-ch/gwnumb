@@ -125,6 +125,10 @@ class MyCustomGWLosses(GWLosses2Domains):
         metrics["rotate_pixel_loss_rotated"] = rotate_pixel_loss_rotated
         metrics["rotate_gw_loss"] = rotate_gw_loss
         metrics["rotate_gw_loss_rotated"] = rotate_gw_loss_rotated
+        for name, value in self.operation_rotate_pixel_mod.metrics(self.gw_mod, raw_data).items():
+            metrics[f"rotate_pixel_{name}"] = value
+        for name, value in self.operation_rotate_pixel_mod.metrics(self.gw_mod, raw_rot).items():
+            metrics[f"rotate_pixel_{name}_rotated"] = value
         for name, value in self.operation_rotate_gw_mod.metrics(self.gw_mod, raw_data).items():
             metrics[f"rotate_gw_{name}"] = value
         for name, value in self.operation_rotate_gw_mod.metrics(self.gw_mod, raw_rot).items():
@@ -228,6 +232,7 @@ def get_global_workspace_mods(
         latent_dim=rotation_ops_config["gw"]["latent_dim"],
         degrees=rotation_ops_config["degrees"],
         n_steps=rotation_ops_config["n_steps"],
+        residual=rotation_ops_config["gw"]["residual"],
     )
 
     loss_mod = MyCustomGWLosses(
