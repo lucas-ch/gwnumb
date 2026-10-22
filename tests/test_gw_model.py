@@ -66,6 +66,12 @@ LOSS_COEFS = {
     "rotate_vae_loss_rotated": 1.0,
     "rotate_gw_loss": 1.0,
     "rotate_gw_loss_rotated": 1.0,
+    "rotate_gw_digit_loss": 1.0,
+    "rotate_gw_digit_loss_rotated": 1.0,
+    "rotate_gw_fused_loss": 1.0,
+    "rotate_gw_fused_loss_rotated": 1.0,
+    "rotate_digit_loss": 1.0,
+    "rotate_digit_loss_rotated": 1.0,
 }
 ROTATION_OPERATIONS_CONFIG = {
     "degrees": 30.0,
@@ -73,6 +79,9 @@ ROTATION_OPERATIONS_CONFIG = {
     "pixel": {"latent_dim": HIDDEN_DIM},
     "vae": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
     "gw": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
+    "gw_digit": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
+    "gw_fused": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
+    "digit": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
 }
 
 
@@ -117,7 +126,7 @@ def make_workspace() -> tuple[MyGlobalWorkspace, dict]:
     selection_mod = SingleDomainSelection()
     contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
 
-    rotation_mods = build_rotation_modules(ROTATION_OPERATIONS_CONFIG, GW_SIZE, IMAGE_DIM)
+    rotation_mods = build_rotation_modules(ROTATION_OPERATIONS_CONFIG, GW_SIZE, IMAGE_DIM, DIGIT_DIM)
 
     loss_mod = MyCustomGWLosses(
         gw_mod=gw_mod,
@@ -151,10 +160,9 @@ class TestMyGlobalWorkspace:
     def test_init_stores_rotation_submodules(self, workspace_and_batch) -> None:
         workspace, _ = workspace_and_batch
 
-        assert set(workspace.rotation_mods.keys()) == {"pixel", "vae", "gw"}
+        assert set(workspace.rotation_mods.keys()) == {"pixel", "vae", "gw", "gw_digit", "gw_fused", "digit"}
         assert isinstance(workspace.rotation_mods["pixel"], PixelRotateOperationModule)
-        assert workspace.rotation_mods["vae"].space == "vae"
-        assert workspace.rotation_mods["gw"].space == "gw"
+        assert all(workspace.rotation_mods[space].space == space for space in ("vae", "gw", "gw_digit", "gw_fused", "digit"))
         assert workspace.gw_mod is workspace.loss_mod.gw_mod
 
     def test_configure_optimizers_returns_adamw(self, workspace_and_batch) -> None:
@@ -191,6 +199,19 @@ class TestMyCustomGWLosses:
 
         assert loss.ndim == 0
         assert torch.isfinite(loss)
+
+    def test_representation_loss_can_keep_a_single_cycle_direction(self, workspace_and_batch) -> None:
+        # config.yaml désactive le cycle image -> digit -> image avec cycles: 0.0
+        workspace, batch = workspace_and_batch
+        loss_mod = workspace.loss_mod
+        domain_latents = workspace.encode_domains(batch)
+        loss_mod.representation_loss_coefs = {"cycles": 0.0, "cycle_digit_through_image": 1.0}
+
+        loss = loss_mod.compute_representation_loss(batch, domain_latents)
+
+        cycles = loss_mod.cycle_loss(domain_latents, batch)
+        assert torch.isclose(loss, cycles["cycle_digit_through_image"])
+        assert not torch.isclose(loss, cycles["cycle_image_through_digit"])
 
     def test_step_logs_the_configured_losses(self, workspace_and_batch) -> None:
         workspace, batch = workspace_and_batch
@@ -267,17 +288,20 @@ class TestModuleFunctions:
         assert isinstance(selection_mod, SingleDomainSelection)
         assert isinstance(loss_mod, MyCustomGWLosses)
         assert loss_mod.rotation_mods is rotation_mods
-        assert {name: mod.degrees for name, mod in rotation_mods.items()} == {"pixel": 30.0, "vae": 30.0, "gw": 30.0}
+        assert {name: mod.degrees for name, mod in rotation_mods.items()} == {"pixel": 30.0, "vae": 30.0, "gw": 30.0, "gw_digit": 30.0, "gw_fused": 30.0, "digit": 30.0}
         assert all(mod.n_steps == 2 for mod in rotation_mods.values())
         assert set(gw_mod.domain_mods.keys()) == {"image", "digit"}
         # les domaines doivent être des sous-modules du GW (state_dict, .to(device))
         assert any(name.startswith("domain_mods.digit.") for name in gw_mod.state_dict())
 
     def test_build_rotation_modules_sizes_each_latent_space(self) -> None:
-        rotation_mods = build_rotation_modules(ROTATION_OPERATIONS_CONFIG, gw_size=GW_SIZE, vae_size=20)
+        rotation_mods = build_rotation_modules(ROTATION_OPERATIONS_CONFIG, gw_size=GW_SIZE, vae_size=20, digit_size=DIGIT_DIM)
 
         assert rotation_mods["vae"](torch.randn(2, 20)).shape == (2, 20)
         assert rotation_mods["gw"](torch.randn(2, GW_SIZE)).shape == (2, GW_SIZE)
+        assert rotation_mods["gw_digit"](torch.randn(2, GW_SIZE)).shape == (2, GW_SIZE)
+        assert rotation_mods["gw_fused"](torch.randn(2, GW_SIZE)).shape == (2, GW_SIZE)
+        assert rotation_mods["digit"](torch.randn(2, DIGIT_DIM)).shape == (2, DIGIT_DIM)
 
     def test_setup_global_workspace_returns_configured_workspace(self, monkeypatch) -> None:
         monkeypatch.setattr("numb_project.gw_model.load_domain_modules", lambda configs: make_domain_modules())

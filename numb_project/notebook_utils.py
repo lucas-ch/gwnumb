@@ -11,7 +11,7 @@ from numb_project.constants import BASE, CONFIG_FILE, CONFIG_FOLDER, DEVICE
 from numb_project.domain_module import get_domains_config
 from numb_project.gw_model import MyGlobalWorkspace, get_global_workspace_mods
 from numb_project.mnist_vae import VAE
-from numb_project.utils import angle_to_cos_sin, cos_sin_to_angle, rotate_images
+from numb_project.utils import angle_to_cos_sin, clean_digit, cos_sin_to_angle, rotate_images
 
 
 # --- Chargement des modèles ---
@@ -148,14 +148,65 @@ def show_image(image: torch.Tensor, title: str) -> None:
     plt.show()
 
 
-# --- Rotations enchaînées : voie pixel vs voie GW ---
+# --- Rotations enchaînées : comparaison des espaces de rotation ---
 
-ROTATION_PATHS = ("pixel", "VAE", "GW")
+# Voies de rotation, de la plus riche à la plus symbolique, et le module de
+# rotation (gw.rotation_mods) de chacune
+ROTATION_MODULES = {"pixel": "pixel", "VAE": "vae", "GW": "gw", "GW via digit": "gw_digit", "GW fusionné": "gw_fused",
+                    "digit": "digit"}
+ROTATION_PATHS = tuple(ROTATION_MODULES)
+EXACT_DIGIT = "rotation exacte de l'angle lu (digit)"
 REFERENCE = "référence : vraie rotation lue par le GW"
-GW_FLOOR = "plancher GW (vraie rotation → GW → image)"
 VAE_FLOOR = "plancher VAE (vraie rotation → VAE → image)"
-# chaque plancher a la couleur de la voie qu'il borne
-CURVE_COLORS = {"pixel": "C0", "VAE": "C1", "GW": "C2", REFERENCE: "black", VAE_FLOOR: "C1", GW_FLOOR: "C2"}
+GW_FLOOR = "plancher GW (vraie rotation → GW → image)"
+SYMBOLIC_FLOOR = "plancher symbolique (vraie rotation → GW → digit propre → GW → image)"
+# chaque plancher a la couleur de la voie qu'il borne ; le plancher symbolique
+# borne à la fois « GW via digit » et « digit » ; la rotation exacte a la
+# couleur de la voie digit, dont elle est la version idéale
+CURVE_COLORS = {"pixel": "C0", "VAE": "C1", "GW": "C2", "GW via digit": "C4", "GW fusionné": "C5", "digit": "C3",
+                EXACT_DIGIT: "C3", REFERENCE: "black", VAE_FLOOR: "C1", GW_FLOOR: "C2", SYMBOLIC_FLOOR: "C4"}
+
+
+def rotate_digit_angle(digits: torch.Tensor, degrees: float) -> torch.Tensor:
+    """Rotation exacte dans l'espace digit : chiffre inchangé, angle + `degrees`."""
+    return torch.cat([digits[:, :BASE], angle_to_cos_sin(cos_sin_to_angle(digits[:, BASE:]) + degrees)], dim=-1)
+
+
+def start_states(gw: MyGlobalWorkspace, images: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Point de départ de chaque voie (et de la rotation exacte) dans son espace.
+    Les voies passant par digit partent du vecteur digit propre, comme à l'entraînement."""
+    gw_state = image_to_gw(gw, images)
+    digits = clean_digit(from_gw(gw, "digit", gw_state))
+    gw_digit_state = to_gw(gw, "digit", digits)
+    return {
+        "pixel": images,
+        "VAE": gw.gw_mod.domain_mods["image"].encode(images),
+        "GW": gw_state,
+        "GW via digit": gw_digit_state,
+        "GW fusionné": 0.5 * (gw_state + gw_digit_state),
+        "digit": digits,
+        EXACT_DIGIT: digits,
+    }
+
+
+def rotate_states(gw: MyGlobalWorkspace, states: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Une rotation de plus sur chaque voie."""
+    degrees = gw.rotation_mods["gw"].degrees
+    return {
+        path: rotate_digit_angle(state, degrees) if path == EXACT_DIGIT else gw.rotation_mods[ROTATION_MODULES[path]](state)
+        for path, state in states.items()
+    }
+
+
+def path_outputs(gw: MyGlobalWorkspace, path: str, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(image produite, vecteur digit lu par le décodeur digit du GW) pour l'état d'une voie."""
+    if path == "pixel":
+        return state, from_gw(gw, "digit", image_to_gw(gw, state))
+    if path == "VAE":
+        return gw.gw_mod.domain_mods["image"].decode(state), from_gw(gw, "digit", to_gw(gw, "image", state))
+    if path in ("digit", EXACT_DIGIT):
+        return gw_to_image(gw, to_gw(gw, "digit", state)), state
+    return gw_to_image(gw, state), from_gw(gw, "digit", state)  # GW, GW via digit, GW fusionné
 
 
 def chained_rotations(
@@ -164,44 +215,49 @@ def chained_rotations(
     """Applique 1 à `max_n` fois les rotations apprises. Pour chaque courbe, chaque n
     et chaque image, tenseurs (max_n, images) parmi : "mse" (image vs vraie
     rotation), "correct" (chiffre reconnu) et "angle_error" (°).
-    Les voies de rotation, toutes lues par le même lecteur (le décodeur digit du GW) :
-     - pixel : rotation sur l'image, image produite lue via image -> GW -> digit ;
-     - VAE : rotation sur le latent du VAE, décodé par le VAE et lu via latent -> GW -> digit ;
-     - GW : rotation sur l'état GW, lu directement, image par GW -> image.
-    Les courbes de comparaison, calculées à partir de la vraie rotation :
+    Les voies de rotation (cf `path_outputs`), toutes lues par le même lecteur
+    (le décodeur digit du GW) :
+     - pixel : rotation sur l'image ;
+     - VAE : rotation sur le latent du VAE ;
+     - GW : rotation sur l'état GW ;
+     - GW via digit : rotation sur l'état GW passé par digit (image -> GW -> digit propre -> GW) ;
+     - GW fusionné : rotation sur 0.5 (GW + GW via digit) ;
+     - digit : rotation sur le vecteur digit propre lu par le GW.
+    Les courbes de comparaison :
+     - EXACT_DIGIT : digit lu au départ, angle tourné exactement de k x degrees,
+       le mieux que la voie digit puisse faire ;
      - REFERENCE (reconnaissance) : ce que le lecteur reconnaît de la vraie image tournée ;
-     - GW_FLOOR (MSE) : vraie image tournée -> GW -> image, le mieux que la voie GW puisse faire ;
-     - VAE_FLOOR (MSE) : vraie image tournée -> VAE -> image, le mieux que la voie VAE puisse faire."""
-    image_mod, rotations = gw.gw_mod.domain_mods["image"], gw.rotation_mods
-    degrees = rotations["gw"].degrees
-    results = {path: {"mse": [], "correct": [], "angle_error": []} for path in ROTATION_PATHS}
-    results |= {REFERENCE: {"correct": [], "angle_error": []}, GW_FLOOR: {"mse": []}, VAE_FLOOR: {"mse": []}}
+     - VAE_FLOOR, GW_FLOOR, SYMBOLIC_FLOOR (MSE) : vraie image tournée passée par
+       le VAE, le GW ou le GW puis digit propre, le mieux que les voies correspondantes
+       puissent faire en pixels."""
+    image_mod = gw.gw_mod.domain_mods["image"]
+    degrees = gw.rotation_mods["gw"].degrees
+    results = {path: {"mse": [], "correct": [], "angle_error": []} for path in (*ROTATION_PATHS, EXACT_DIGIT)}
+    results |= {REFERENCE: {"correct": [], "angle_error": []},
+                VAE_FLOOR: {"mse": []}, GW_FLOOR: {"mse": []}, SYMBOLIC_FLOOR: {"mse": []}}
 
     def mse(produced: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return ((produced - target) ** 2).mean(dim=(1, 2, 3))
 
-    pixel_images, vae_state, gw_state = images, image_mod.encode(images), image_to_gw(gw, images)
+    states = start_states(gw, images)
     for n in range(1, max_n + 1):
-        pixel_images, vae_state, gw_state = rotations["pixel"](pixel_images), rotations["vae"](vae_state), rotations["gw"](gw_state)
+        states = rotate_states(gw, states)
         target = rotate_by(images, degrees * n)
         target_angles = start_angles + degrees * n
-        target_state = image_to_gw(gw, target)
-        # (image produite, état GW lu par le décodeur digit) pour chaque voie
-        outputs = {
-            "pixel": (pixel_images, image_to_gw(gw, pixel_images)),
-            "VAE": (image_mod.decode(vae_state), to_gw(gw, "image", vae_state)),
-            "GW": (gw_to_image(gw, gw_state), gw_state),
-        }
-        for path, (produced, state) in outputs.items():
-            correct, err = recognition(from_gw(gw, "digit", state), labels, target_angles)
+        for path, state in states.items():
+            produced, digits = path_outputs(gw, path, state)
+            correct, err = recognition(digits, labels, target_angles)
             results[path]["mse"].append(mse(produced, target))
             results[path]["correct"].append(correct)
             results[path]["angle_error"].append(err)
-        correct, err = recognition(from_gw(gw, "digit", target_state), labels, target_angles)
+        target_state = image_to_gw(gw, target)
+        target_digits = from_gw(gw, "digit", target_state)
+        correct, err = recognition(target_digits, labels, target_angles)
         results[REFERENCE]["correct"].append(correct)
         results[REFERENCE]["angle_error"].append(err)
-        results[GW_FLOOR]["mse"].append(mse(gw_to_image(gw, target_state), target))
         results[VAE_FLOOR]["mse"].append(mse(image_mod.decode(image_mod.encode(target)), target))
+        results[GW_FLOOR]["mse"].append(mse(gw_to_image(gw, target_state), target))
+        results[SYMBOLIC_FLOOR]["mse"].append(mse(gw_to_image(gw, to_gw(gw, "digit", clean_digit(target_digits))), target))
     return {path: {name: torch.stack(values).cpu() for name, values in r.items()} for path, r in results.items()}
 
 
@@ -226,29 +282,30 @@ def plot_chained_rotations(results: dict[str, dict[str, torch.Tensor]], title: s
         ax.set_xticks(ns)
         ax.set_xlabel("nombre de rotations enchaînées")
         ax.set_ylabel(ylabel)
-        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
+    # une seule légende sous les graphiques, avec toutes les courbes
+    legend = {label: handle for ax in axes for handle, label in zip(*ax.get_legend_handles_labels())}
+    fig.legend(legend.values(), legend.keys(), loc="lower center", ncol=4, fontsize=8)
     fig.suptitle(title)
-    plt.tight_layout()
+    plt.tight_layout(rect=(0, 0.17, 1, 1))
     plt.show()
 
-    for n in range(max_n):
-        print(f"n={n + 1:>2}: " + "  |  ".join(
-            f"{path} : MSE {results[path]['mse'][n].mean():.4f}, chiffre {results[path]['correct'][n].mean():5.1%}, "
-            f"angle {results[path]['angle_error'][n].mean():5.1f}°"
-            for path in ROTATION_PATHS
-        ) + f"  |  référence : chiffre {results[REFERENCE]['correct'][n].mean():5.1%}, "
-            f"angle {results[REFERENCE]['angle_error'][n].mean():5.1f}°"
-            f"  |  planchers MSE : GW {results[GW_FLOOR]['mse'][n].mean():.4f}, VAE {results[VAE_FLOOR]['mse'][n].mean():.4f}")
+    # tableau : une section par métrique, une ligne par courbe, une colonne par n
+    name_width = max(len(path) for path in results)
+    for metric, fmt in [("mse", "{:7.4f}"), ("correct", "{:7.1%}"), ("angle_error", "{:6.1f}°")]:
+        print(f"\n{metric:<{name_width}} " + "".join(f"{f'n={n}':>8}" for n in ns))
+        for path, values in results.items():
+            if metric in values:
+                print(f"{path:<{name_width}} " + "".join(f"{fmt.format(v):>8}" for v in values[metric].mean(dim=1).tolist()))
 
 
 def plot_per_digit(results: dict[str, dict[str, torch.Tensor]], labels: torch.Tensor, title: str) -> None:
     """Précision et erreur d'angle par chiffre (lignes) et par nombre de rotations
-    (colonnes), pour chaque voie et pour la référence."""
+    (colonnes), pour chaque voie, la rotation exacte et la référence."""
     labels = labels.cpu()
-    paths = [*ROTATION_PATHS, REFERENCE]
+    paths = [*ROTATION_PATHS, EXACT_DIGIT, REFERENCE]
     max_n = results["GW"]["correct"].shape[0]
-    fig, axes = plt.subplots(2, len(paths), figsize=(6 * len(paths), 9))
+    fig, axes = plt.subplots(2, len(paths), figsize=(4.5 * len(paths), 9))
     for row, (metric, label, cmap, vmax, fmt) in enumerate([
         ("correct", "précision sur le chiffre", "RdYlGn", 1, "{:.0%}"),
         ("angle_error", "erreur d'angle moyenne (°)", "RdYlGn_r", 90, "{:.0f}"),
@@ -271,31 +328,27 @@ def plot_per_digit(results: dict[str, dict[str, torch.Tensor]], labels: torch.Te
     plt.show()
 
 
-TRANSFORM_COLUMNS = ("réel", "pixel", "VAE", "GW")
+TRANSFORM_COLUMNS = ("réel", *ROTATION_PATHS)
+COLUMN_TITLES = {"GW via digit": "GW (d)", "GW fusionné": "GW (f)"}  # titre court : les colonnes sont étroites
 
 
 def show_chained_rotations(gw: MyGlobalWorkspace, images: torch.Tensor, max_n: int = 12,
                            n_images: int = 3, cell_size: float = 0.55) -> None:
     """Suivi pas à pas des rotations enchaînées : une ligne par étape (angle
-    cumulé), et pour chaque image un bloc de colonnes : vraie rotation, voies
-    pixel, VAE et GW. À l'étape 0, chaque voie montre son point de départ
-    (image d'origine, reconstruction par le VAE, demi-cycle par le GW)."""
-    image_mod, rotations = gw.gw_mod.domain_mods["image"], gw.rotation_mods
-    degrees = rotations["gw"].degrees
+    cumulé), et pour chaque image un bloc de colonnes : vraie rotation, puis
+    chaque voie (pixel, VAE, GW, GW via digit, GW fusionné, digit). À l'étape 0, chaque voie
+    montre son point de départ (image d'origine, reconstruction par le VAE,
+    demi-cycle par le GW, cycle par digit, moyenne des deux)."""
+    degrees = gw.rotation_mods["gw"].degrees
     images = images[:n_images]
 
-    pixel_images, vae_state, gw_state = images, image_mod.encode(images), image_to_gw(gw, images)
+    states = start_states(gw, images)
     steps = []
     for n in range(max_n + 1):
         if n > 0:
-            pixel_images, vae_state, gw_state = rotations["pixel"](pixel_images), rotations["vae"](vae_state), rotations["gw"](gw_state)
-        steps.append({
-            "réel": rotate_by(images, degrees * n),
-            "pixel": pixel_images,
-            "VAE": image_mod.decode(vae_state),
-            "GW": gw_to_image(gw, gw_state),
-        })
-
+            states = rotate_states(gw, states)
+        steps.append({"réel": rotate_by(images, degrees * n)}
+                     | {path: path_outputs(gw, path, states[path])[0] for path in ROTATION_PATHS})
     # un bloc de colonnes par image, séparés par une colonne vide étroite
     n_cols = len(TRANSFORM_COLUMNS)
     width_ratios = ([1] * n_cols + [0.4]) * n_images
@@ -313,7 +366,7 @@ def show_chained_rotations(gw: MyGlobalWorkspace, images: torch.Tensor, max_n: i
                 ax = axes[n, i * (n_cols + 1) + c]
                 ax.imshow(step[name][i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
                 if n == 0:
-                    ax.set_title(name, fontsize=7)
+                    ax.set_title(COLUMN_TITLES.get(name, name), fontsize=7)
         axes[n, 0].text(-0.15, 0.5, f"{degrees * n:.0f}°", transform=axes[n, 0].transAxes,
                         ha="right", va="center", fontsize=7)
     fig.subplots_adjust(left=0.06, right=0.99, top=0.95, bottom=0.01)

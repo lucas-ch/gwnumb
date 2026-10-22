@@ -44,3 +44,9 @@ def cos_sin_to_angle(cos_sin: torch.Tensor) -> torch.Tensor:
     """Inverse de angle_to_cos_sin : angle en degrés dans [0, 360[ (le vecteur
     (cos, sin) n'a pas besoin d'être de norme 1)."""
     return torch.rad2deg(torch.atan2(cos_sin[..., 1], cos_sin[..., 0])) % 360
+
+def clean_digit(digits: torch.Tensor) -> torch.Tensor:
+    """Version « propre » d'un vecteur digit prédit : one-hot exact du chiffre
+    lu (argmax) et (cos, sin) ramené à la norme 1. Ne garde que le chiffre et
+    l'angle, sans les petits écarts par lesquels le style peut passer."""
+    return torch.cat([F.one_hot(digits[:, :BASE].argmax(-1), BASE).float(), F.normalize(digits[:, BASE:], dim=-1)], dim=-1)

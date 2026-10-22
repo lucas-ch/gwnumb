@@ -157,15 +157,24 @@ def build_gw_encoders_decoders(
         )
     return nn.ModuleDict(gw_encoders), nn.ModuleDict(gw_decoders)
 
-def build_rotation_modules(rotation_config: dict[str, Any], gw_size: int, vae_size: int) -> nn.ModuleDict:
-    """Une rotation apprise par espace : pixels, latent du VAE, état du GW."""
+def build_rotation_modules(
+    rotation_config: dict[str, Any], gw_size: int, vae_size: int, digit_size: int
+) -> nn.ModuleDict:
+    """Une rotation apprise par espace : pixels, latent du VAE, état du GW,
+    état du GW passé par digit, fusion des deux états GW, vecteur digit."""
     common = {"degrees": rotation_config["degrees"], "n_steps": rotation_config["n_steps"]}
+
+    def latent(space: str, size: int) -> LatentRotateOperationModule:
+        return LatentRotateOperationModule(space, size, rotation_config[space]["hidden_size"],
+                                           rotation_config[space]["latent_dim"], **common)
+
     return nn.ModuleDict({
         "pixel": PixelRotateOperationModule(latent_dim=rotation_config["pixel"]["latent_dim"], **common),
-        "vae": LatentRotateOperationModule("vae", vae_size, rotation_config["vae"]["hidden_size"],
-                                           rotation_config["vae"]["latent_dim"], **common),
-        "gw": LatentRotateOperationModule("gw", gw_size, rotation_config["gw"]["hidden_size"],
-                                          rotation_config["gw"]["latent_dim"], **common),
+        "vae": latent("vae", vae_size),
+        "gw": latent("gw", gw_size),
+        "gw_digit": latent("gw_digit", gw_size),
+        "gw_fused": latent("gw_fused", gw_size),
+        "digit": latent("digit", digit_size),
     })
 
 def get_global_workspace_mods(
@@ -194,7 +203,8 @@ def get_global_workspace_mods(
     )
 
     rotation_mods = build_rotation_modules(
-        config["global_workspace"]["rotation_operations"], gw_size, domain_modules["image"].latent_dim
+        config["global_workspace"]["rotation_operations"], gw_size,
+        domain_modules["image"].latent_dim, domain_modules["digit"].latent_dim,
     )
 
     loss_mod = MyCustomGWLosses(

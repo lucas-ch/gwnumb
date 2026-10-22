@@ -21,6 +21,9 @@ def get_config(checkpoint_path: str | None) -> dict[str, Any]:
         config['global_workspace']['loss_coefficients']['rotate_pixel_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['rotate_vae_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['rotate_gw_loss'] = 0.0
+        config['global_workspace']['loss_coefficients']['rotate_gw_digit_loss'] = 0.0
+        config['global_workspace']['loss_coefficients']['rotate_gw_fused_loss'] = 0.0
+        config['global_workspace']['loss_coefficients']['rotate_digit_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['representation_loss'] = 0.0
 
     return config
@@ -57,7 +60,7 @@ def get_training_objects(
     }
 
 def main() -> None:
-    run_name = 'rotation_all'
+    run_name = 'rotation_fuse'
     checkpoint_path = None
 
     config = get_config(checkpoint_path)

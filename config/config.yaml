@@ -8,7 +8,13 @@ global_workspace:
     latent_dim: 10
 
     representation_loss_coefficients:
-        cycles: 1.0
+        # Cycles par direction plutôt que `cycles` (moyenne des deux) : le cycle
+        # image -> GW -> digit -> GW -> image est désactivé, car il demande de
+        # retrouver le style de l'image à partir d'un chiffre et d'un angle, ce
+        # que le modèle ne peut faire qu'en cachant le style dans les petits
+        # écarts du vecteur digit (cf test_digit_space.ipynb).
+        cycles: 0.0
+        cycle_digit_through_image: 1.0
         contrastives: 0.01
         demi_cycles: 1.0
         translations: 1.0
@@ -21,6 +27,12 @@ global_workspace:
         rotate_vae_loss_rotated: 1.0
         rotate_gw_loss: 1.0
         rotate_gw_loss_rotated: 1.0
+        rotate_gw_digit_loss: 1.0
+        rotate_gw_digit_loss_rotated: 1.0
+        rotate_gw_fused_loss: 1.0
+        rotate_gw_fused_loss_rotated: 1.0
+        rotate_digit_loss: 1.0
+        rotate_digit_loss_rotated: 1.0
     encoders:
         hidden_dim:
             image: 256
@@ -33,11 +45,15 @@ global_workspace:
     #  - pixel : directement sur l'image (CNN), latent_dim = largeur du goulot
     #    d'étranglement entre l'encodeur et le décodeur convolutifs.
     #  - vae   : dans le latent du VAE (mu, 20D), MLP ;
-    #  - gw    : dans l'espace du global workspace (10D), même MLP.
-    #    Pour vae et gw : hidden_size = largeur des couches denses et
+    #  - gw    : dans l'espace du global workspace (10D), même MLP ;
+    #  - gw_digit : dans le GW après passage par digit (image -> GW -> digit
+    #    -> GW, 10D) : ne garde que chiffre et angle, sans le style ;
+    #  - gw_fused : fusion des deux états GW précédents, 0.5 (gw + gw_digit), 10D ;
+    #  - digit : dans le domaine digit lu par le GW (image -> GW -> digit, 12D).
+    #    Pour les espaces latents : hidden_size = largeur des couches denses et
     #    latent_dim = taille de la couche intermédiaire ; garder les mêmes
     #    valeurs pour que seul l'espace diffère.
-    # degrees : angle de la rotation apprise, commun aux deux variantes.
+    # degrees : angle de la rotation apprise, commun à toutes les variantes.
     # n_steps : nombre de rotations enchaînées dans la loss (1 = une seule
     #    rotation) ; la loss est la moyenne sur les étapes 1..n_steps.
     rotation_operations:
@@ -49,6 +65,15 @@ global_workspace:
             hidden_size: 64
             latent_dim: 32
         gw:
+            hidden_size: 64
+            latent_dim: 32
+        gw_digit:
+            hidden_size: 64
+            latent_dim: 32
+        gw_fused:
+            hidden_size: 64
+            latent_dim: 32
+        digit:
             hidden_size: 64
             latent_dim: 32
 

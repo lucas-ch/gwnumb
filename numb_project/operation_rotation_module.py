@@ -3,12 +3,18 @@ from torch import nn
 import torch
 import torch.nn.functional as F
 
-from numb_project.utils import rotate_images
+from numb_project.utils import clean_digit, rotate_images
 
 
 def image_to_gw_state(gw_mod: GWModule, image: torch.Tensor) -> torch.Tensor:
     image_latent = gw_mod.domain_mods["image"].encode(image)
     return gw_mod.fusion_activation_fn(gw_mod.gw_encoders["image"](image_latent))
+
+
+def image_to_digit(gw_mod: GWModule, image: torch.Tensor) -> torch.Tensor:
+    """Image -> GW -> vecteur digit propre (one-hot exact du chiffre + (cos, sin)
+    de norme 1) : le vecteur prédit est nettoyé pour ne pas transporter de style."""
+    return clean_digit(gw_mod.gw_decoders["digit"](image_to_gw_state(gw_mod, image)))
 
 
 def chained_rotation_targets(image: torch.Tensor, degrees: float, n_steps: int) -> list[torch.Tensor]:
@@ -81,11 +87,20 @@ class PixelRotateOperationModule(nn.Module):
 class LatentRotateOperationModule(nn.Module):
     """Rotation apprise dans un espace latent, pour un angle fixe : MLP encodeur
     -> couche intermédiaire de taille `latent_dim` -> décodeur. L'espace est
-    choisi par `space` :
-     - "gw"  : état du global workspace (tanh de l'encodage GW), dans [-1, 1] ;
-     - "vae" : latent du VAE (mu), non borné, pour comparer avec une rotation
-       faite hors du GW.
-    Entraînement identique dans les deux cas, seul l'encodage des images change."""
+    choisi par `space` (du plus riche au plus symbolique) :
+     - "vae"      : latent du VAE (mu), non borné, rotation faite hors du GW ;
+     - "gw"       : état du global workspace (tanh de l'encodage GW), dans [-1, 1] ;
+     - "gw_digit" : état GW après un passage par le domaine digit
+       (image -> GW -> digit propre -> GW), qui ne garde que chiffre et angle ;
+     - "gw_fused" : fusion des deux précédents, 0.5 (gw + gw_digit) ;
+     - "digit"    : vecteur digit propre lu par le GW (image -> GW -> digit),
+       cf `image_to_digit`.
+    Entraînement identique dans tous les cas, seul l'encodage des images change :
+    les cibles sont produites par le modèle à partir des images tournées, sans
+    utiliser les vrais labels."""
+
+    SPACES = ("vae", "gw", "gw_digit", "gw_fused", "digit")
+    BOUNDED_SPACES = ("gw", "gw_digit", "gw_fused")  # états GW (ou leur moyenne), bornés par le tanh
 
     def __init__(
         self,
@@ -97,7 +112,7 @@ class LatentRotateOperationModule(nn.Module):
         n_steps: int = 1,
     ):
         super().__init__()
-        assert space in ("gw", "vae"), f"espace inconnu : {space}"
+        assert space in self.SPACES, f"espace inconnu : {space}"
         self.space = space
         self.degrees = degrees
         self.n_steps = n_steps
@@ -120,13 +135,22 @@ class LatentRotateOperationModule(nn.Module):
 
     def encode(self, gw_mod: GWModule, image: torch.Tensor) -> torch.Tensor:
         """Image -> point de l'espace où se fait la rotation."""
+        if self.space == "vae":
+            return gw_mod.domain_mods["image"].encode(image)
+        gw_state = image_to_gw_state(gw_mod, image)
         if self.space == "gw":
-            return image_to_gw_state(gw_mod, image)
-        return gw_mod.domain_mods["image"].encode(image)
+            return gw_state
+        digit = clean_digit(gw_mod.gw_decoders["digit"](gw_state))  # = image_to_digit
+        if self.space == "digit":
+            return digit
+        gw_digit_state = gw_mod.fusion_activation_fn(gw_mod.gw_encoders["digit"](digit))
+        if self.space == "gw_digit":
+            return gw_digit_state
+        return 0.5 * (gw_state + gw_digit_state)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.decoder(self.encoder(x))
-        return torch.tanh(out) if self.space == "gw" else out
+        return torch.tanh(out) if self.space in self.BOUNDED_SPACES else out
 
     def loss(
         self,
