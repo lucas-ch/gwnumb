@@ -6,8 +6,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 
 from numb_project.constants import *
 from numb_project.data_module import MnistDataModule
-from numb_project.domain_module import LoadedDomainConfig, get_domains_config
-from numb_project.gw_model import setup_global_workspace
+from numb_project.gw_model import MyGlobalWorkspace
 
 def get_config(checkpoint_path: str | None) -> dict[str, Any]:
     config = load_config_files(
@@ -18,24 +17,19 @@ def get_config(checkpoint_path: str | None) -> dict[str, Any]:
     if checkpoint_path is None:
         config['global_workspace']['loss_coefficients']['task_loss'] = 0.0
     else:
-        config['global_workspace']['loss_coefficients']['rotate_pixel_loss'] = 0.0
-        config['global_workspace']['loss_coefficients']['rotate_vae_loss'] = 0.0
-        config['global_workspace']['loss_coefficients']['rotate_gw_loss'] = 0.0
-        config['global_workspace']['loss_coefficients']['rotate_gw_digit_loss'] = 0.0
-        config['global_workspace']['loss_coefficients']['rotate_gw_fused_loss'] = 0.0
-        config['global_workspace']['loss_coefficients']['rotate_digit_loss'] = 0.0
+        for space in config['global_workspace']['rotation_operations']['enabled']:
+            config['global_workspace']['loss_coefficients'][f'rotate_{space}_loss'] = 0.0
         config['global_workspace']['loss_coefficients']['representation_loss'] = 0.0
 
     return config
 
 def get_training_objects(
     config: dict[str, Any],
-    domain_configs: list[LoadedDomainConfig],
     training_name: str,
     checkpoint_path: str | None = None,
 ) -> dict[str, Any]:
     data_module = MnistDataModule(config['training']['batch_size'])
-    global_workspace = setup_global_workspace(config, domain_configs)
+    global_workspace = MyGlobalWorkspace(config)
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=GW_CHECKPOINT_FOLDER,
@@ -64,10 +58,7 @@ def main() -> None:
     checkpoint_path = None
 
     config = get_config(checkpoint_path)
-    domain_configs = get_domains_config(['image', 'digit'], config['domains']['digit'])
-    training_objects = get_training_objects(
-        config, domain_configs, run_name, checkpoint_path=checkpoint_path
-    )
+    training_objects = get_training_objects(config, run_name, checkpoint_path=checkpoint_path)
 
     training_objects['trainer'].fit(training_objects['global_workspace'], training_objects['data_module'])
 

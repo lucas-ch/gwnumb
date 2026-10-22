@@ -7,7 +7,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from numb_project.constants import BASE, DIGIT_DIM
-from numb_project.domain_module import DigitAngleDomain, LoadedDomainConfig
+from numb_project.domain_module import DigitAngleDomain
 from numb_project.gw_model import (
     MyCustomGWLosses,
     MyGlobalWorkspace,
@@ -15,7 +15,6 @@ from numb_project.gw_model import (
     build_rotation_modules,
     get_global_workspace_mods,
     make_rotated_gw_batch,
-    setup_global_workspace,
 )
 from numb_project.operation_rotation_module import LatentRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import angle_to_cos_sin
@@ -74,6 +73,7 @@ LOSS_COEFS = {
     "rotate_digit_loss_rotated": 1.0,
 }
 ROTATION_OPERATIONS_CONFIG = {
+    "enabled": ["pixel", "vae", "gw", "gw_digit", "gw_fused", "digit"],
     "degrees": 30.0,
     "n_steps": 2,
     "pixel": {"latent_dim": HIDDEN_DIM},
@@ -85,16 +85,18 @@ ROTATION_OPERATIONS_CONFIG = {
 }
 
 
-def make_config(batch_size: int = BATCH_SIZE, lr: float = 1e-3) -> dict[str, Any]:
+def make_config(batch_size: int = BATCH_SIZE, lr: float = 1e-3, enabled: list[str] | None = None) -> dict[str, Any]:
     hidden_dim = {"image": HIDDEN_DIM, "digit": HIDDEN_DIM}
+    rotation_config = ROTATION_OPERATIONS_CONFIG | ({"enabled": enabled} if enabled is not None else {})
     return {
+        "domains": {"digit": {"angle_loss_weight": 1.0}},
         "global_workspace": {
             "latent_dim": GW_SIZE,
             "encoders": {"hidden_dim": hidden_dim, "n_layers": 1},
             "decoders": {"hidden_dim": hidden_dim, "n_layers": 1},
             "representation_loss_coefficients": REPRESENTATION_LOSS_COEFS,
             "loss_coefficients": LOSS_COEFS,
-            "rotation_operations": ROTATION_OPERATIONS_CONFIG,
+            "rotation_operations": rotation_config,
         },
         "training": {"batch_size": batch_size, "optim": {"lr": lr}},
     }
@@ -116,44 +118,20 @@ def make_domain_modules() -> nn.ModuleDict:
     return nn.ModuleDict({"image": SpatialIdentityDomain(IMAGE_SHAPE), "digit": DigitAngleDomain()})
 
 
-def make_workspace() -> tuple[MyGlobalWorkspace, dict]:
+def make_workspace(monkeypatch: pytest.MonkeyPatch, **config_kwargs: Any) -> MyGlobalWorkspace:
     """Builds a minimal but fully-wired MyGlobalWorkspace with 'image'/'digit'
     domains, using an identity image domain so the graph doesn't depend on a
     pretrained VAE checkpoint."""
-    domain_modules = make_domain_modules()
-    gw_encoders, gw_decoders = build_gw_encoders_decoders(domain_modules, GW_SIZE, HIDDEN_DIM, 1, HIDDEN_DIM, 1)
-    gw_mod = GWModule(domain_modules, GW_SIZE, gw_encoders, gw_decoders)
-    selection_mod = SingleDomainSelection()
-    contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
-
-    rotation_mods = build_rotation_modules(ROTATION_OPERATIONS_CONFIG, GW_SIZE, IMAGE_DIM, DIGIT_DIM)
-
-    loss_mod = MyCustomGWLosses(
-        gw_mod=gw_mod,
-        selection_mod=selection_mod,
-        domain_mods=domain_modules,
-        loss_coefs=LOSS_COEFS,
-        representation_loss_coefs=REPRESENTATION_LOSS_COEFS,
-        contrastive_fn=contrastive_fn,
-        rotation_mods=rotation_mods,
-    )
-
-    workspace = MyGlobalWorkspace(
-        gw_mod=gw_mod,
-        selection_mod=selection_mod,
-        loss_mod=loss_mod,
-        optim_lr=1e-3,
-        rotation_mods=rotation_mods,
-    )
+    monkeypatch.setattr("numb_project.gw_model.load_domain_modules", lambda configs: make_domain_modules())
+    workspace = MyGlobalWorkspace(make_config(**config_kwargs))
     # generic_step logs metrics, which needs an attached trainer
     workspace.log = lambda *args, **kwargs: None
-
-    return workspace, make_batch()
+    return workspace
 
 
 @pytest.fixture
-def workspace_and_batch() -> tuple[MyGlobalWorkspace, dict]:
-    return make_workspace()
+def workspace_and_batch(monkeypatch) -> tuple[MyGlobalWorkspace, dict]:
+    return make_workspace(monkeypatch), make_batch()
 
 
 class TestMyGlobalWorkspace:
@@ -282,7 +260,7 @@ class TestModuleFunctions:
     def test_get_global_workspace_mods_wires_all_components(self, monkeypatch) -> None:
         monkeypatch.setattr("numb_project.gw_model.load_domain_modules", lambda configs: make_domain_modules())
 
-        gw_mod, selection_mod, loss_mod, rotation_mods = get_global_workspace_mods(make_config(), [])
+        gw_mod, selection_mod, loss_mod, rotation_mods = get_global_workspace_mods(make_config())
 
         assert isinstance(gw_mod, GWModule)
         assert isinstance(selection_mod, SingleDomainSelection)
@@ -303,10 +281,43 @@ class TestModuleFunctions:
         assert rotation_mods["gw_fused"](torch.randn(2, GW_SIZE)).shape == (2, GW_SIZE)
         assert rotation_mods["digit"](torch.randn(2, DIGIT_DIM)).shape == (2, DIGIT_DIM)
 
-    def test_setup_global_workspace_returns_configured_workspace(self, monkeypatch) -> None:
-        monkeypatch.setattr("numb_project.gw_model.load_domain_modules", lambda configs: make_domain_modules())
+    def test_build_rotation_modules_only_builds_enabled_spaces(self) -> None:
+        config = ROTATION_OPERATIONS_CONFIG | {"enabled": ["gw", "gw_fused"]}
 
-        workspace = setup_global_workspace(make_config(lr=5e-4), [])
+        rotation_mods = build_rotation_modules(config, gw_size=GW_SIZE, vae_size=20, digit_size=DIGIT_DIM)
 
-        assert isinstance(workspace, MyGlobalWorkspace)
+        assert list(rotation_mods.keys()) == ["gw", "gw_fused"]
+
+
+class TestConfigInCheckpoint:
+    def test_workspace_is_built_from_config(self, monkeypatch) -> None:
+        workspace = make_workspace(monkeypatch, lr=5e-4)
+
         assert workspace.optim_lr == 5e-4
+        assert workspace.config == make_config(lr=5e-4)
+
+    def test_disabled_rotations_have_no_module_nor_loss(self, monkeypatch) -> None:
+        workspace = make_workspace(monkeypatch, enabled=["gw"])
+        batch = make_batch()
+
+        loss_output = workspace.loss_mod.step(batch, workspace.encode_domains(batch), "train")
+
+        assert set(workspace.rotation_mods.keys()) == {"gw"}
+        assert {name for name in loss_output.metrics if name.startswith("rotate_")} == {"rotate_gw_loss", "rotate_gw_loss_rotated"}
+
+    def test_checkpoint_reloads_with_its_own_config(self, monkeypatch, tmp_path) -> None:
+        workspace = make_workspace(monkeypatch, enabled=["pixel", "gw_fused"])
+        checkpoint_path = tmp_path / "gw.ckpt"
+        torch.save({
+            "state_dict": workspace.state_dict(),
+            MyGlobalWorkspace.CHECKPOINT_HYPER_PARAMS_KEY: dict(workspace.hparams),
+            "pytorch-lightning_version": "2.0.0",
+        }, checkpoint_path)
+
+        # pas de config passée au chargement : celle du checkpoint est utilisée
+        reloaded = MyGlobalWorkspace.load_from_checkpoint(checkpoint_path, weights_only=False)
+
+        assert reloaded.config == workspace.config
+        assert set(reloaded.rotation_mods.keys()) == {"pixel", "gw_fused"}
+        for name, value in workspace.state_dict().items():
+            assert torch.equal(reloaded.state_dict()[name], value)

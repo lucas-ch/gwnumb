@@ -8,21 +8,22 @@ from torch.optim import AdamW
 import torch.nn.functional as F
 
 from numb_project.constants import BASE, DEVICE
-from numb_project.domain_module import LoadedDomainConfig, load_domain_modules
+from numb_project.domain_module import get_domains_config, load_domain_modules
 from numb_project.operation_rotation_module import LatentRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import angle_to_cos_sin, rotate_images
 from numb_project.utils import get_from_dict_or_val
 
 class MyGlobalWorkspace(GlobalWorkspaceBase):
-    def __init__(
-        self,
-        gw_mod: GWModule,
-        selection_mod: SelectionBase,
-        loss_mod: GWLosses,
-        rotation_mods: nn.ModuleDict,
-        optim_lr: float = 1e-3,
-    ) -> None:
-        super().__init__(gw_mod, selection_mod, loss_mod, optim_lr)
+    """GW entièrement construit à partir de `config` (même format que
+    config/config.yaml). La config est enregistrée dans les hyperparamètres du
+    checkpoint : `MyGlobalWorkspace.load_from_checkpoint(path)` reconstruit
+    exactement les modules entraînés (dont les rotations activées), sans
+    dépendre de la config actuelle."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        gw_mod, selection_mod, loss_mod, rotation_mods = get_global_workspace_mods(config)
+        super().__init__(gw_mod, selection_mod, loss_mod, config["training"]["optim"]["lr"])
+        self.config = config
         self.rotation_mods = rotation_mods
 
     def configure_optimizers(self) -> dict[str, AdamW]:
@@ -160,32 +161,29 @@ def build_gw_encoders_decoders(
 def build_rotation_modules(
     rotation_config: dict[str, Any], gw_size: int, vae_size: int, digit_size: int
 ) -> nn.ModuleDict:
-    """Une rotation apprise par espace : pixels, latent du VAE, état du GW,
-    état du GW passé par digit, fusion des deux états GW, vecteur digit."""
+    """Une rotation apprise par espace listé dans `rotation_config["enabled"]`,
+    parmi : pixels, latent du VAE, état du GW, état du GW passé par digit,
+    fusion des deux états GW, vecteur digit."""
     common = {"degrees": rotation_config["degrees"], "n_steps": rotation_config["n_steps"]}
+    latent_sizes = {"vae": vae_size, "gw": gw_size, "gw_digit": gw_size, "gw_fused": gw_size, "digit": digit_size}
 
-    def latent(space: str, size: int) -> LatentRotateOperationModule:
-        return LatentRotateOperationModule(space, size, rotation_config[space]["hidden_size"],
+    def build(space: str) -> nn.Module:
+        if space == "pixel":
+            return PixelRotateOperationModule(latent_dim=rotation_config["pixel"]["latent_dim"], **common)
+        assert space in latent_sizes, f"opération de rotation inconnue : {space}"
+        return LatentRotateOperationModule(space, latent_sizes[space], rotation_config[space]["hidden_size"],
                                            rotation_config[space]["latent_dim"], **common)
 
-    return nn.ModuleDict({
-        "pixel": PixelRotateOperationModule(latent_dim=rotation_config["pixel"]["latent_dim"], **common),
-        "vae": latent("vae", vae_size),
-        "gw": latent("gw", gw_size),
-        "gw_digit": latent("gw_digit", gw_size),
-        "gw_fused": latent("gw_fused", gw_size),
-        "digit": latent("digit", digit_size),
-    })
+    return nn.ModuleDict({space: build(space) for space in rotation_config["enabled"]})
 
 def get_global_workspace_mods(
         config: dict[str, Any],
-        domains_configs: list[LoadedDomainConfig],
         ) -> tuple[GWModule, SingleDomainSelection, MyCustomGWLosses, nn.ModuleDict]:
     selection_mod = SingleDomainSelection()
     contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
     gw_size = config["global_workspace"]["latent_dim"]
 
-    domain_modules = load_domain_modules(domains_configs)
+    domain_modules = load_domain_modules(get_domains_config(["image", "digit"], config["domains"]["digit"]))
     gw_encoders, gw_decoders = build_gw_encoders_decoders(
         domain_modules,
         gw_size,
@@ -219,16 +217,3 @@ def get_global_workspace_mods(
 
     return gw_mod, selection_mod, loss_mod, rotation_mods
 
-
-def setup_global_workspace(config: dict[str, Any], domains_configs: list[LoadedDomainConfig]) -> MyGlobalWorkspace:
-    gw_mod, selection_mod, loss_mod, rotation_mods = get_global_workspace_mods(config, domains_configs)
-
-    global_workspace = MyGlobalWorkspace(
-        gw_mod=gw_mod,
-        selection_mod=selection_mod,
-        loss_mod=loss_mod,
-        optim_lr=config["training"]["optim"]["lr"],
-        rotation_mods=rotation_mods,
-    )
-
-    return global_workspace

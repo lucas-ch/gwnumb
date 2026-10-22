@@ -4,12 +4,10 @@ affichage et analyse des rotations enchaînées."""
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
-from cfg_tools import load_config_files
 from torchvision import datasets, transforms
 
-from numb_project.constants import BASE, CONFIG_FILE, CONFIG_FOLDER, DEVICE
-from numb_project.domain_module import get_domains_config
-from numb_project.gw_model import MyGlobalWorkspace, get_global_workspace_mods
+from numb_project.constants import BASE, DEVICE
+from numb_project.gw_model import MyGlobalWorkspace
 from numb_project.mnist_vae import VAE
 from numb_project.utils import angle_to_cos_sin, clean_digit, cos_sin_to_angle, rotate_images
 
@@ -17,19 +15,9 @@ from numb_project.utils import angle_to_cos_sin, clean_digit, cos_sin_to_angle, 
 # --- Chargement des modèles ---
 
 def load_global_workspace(checkpoint_path: str) -> MyGlobalWorkspace:
-    """GW construit avec la config actuelle, poids du checkpoint, en mode eval."""
-    config = load_config_files(CONFIG_FOLDER, use_cli=False, load_files=[CONFIG_FILE])[0]
-    domain_configs = get_domains_config(["image", "digit"], config["domains"]["digit"])
-    gw_mod, selection_mod, loss_mod, rotation_mods = get_global_workspace_mods(config, domain_configs)
-    gw = MyGlobalWorkspace.load_from_checkpoint(
-        checkpoint_path,
-        gw_mod=gw_mod,
-        selection_mod=selection_mod,
-        loss_mod=loss_mod,
-        rotation_mods=rotation_mods,
-        map_location=DEVICE,
-        weights_only=False,
-    )
+    """GW reconstruit avec la config enregistrée dans le checkpoint (`gw.config`),
+    poids du checkpoint, en mode eval."""
+    gw = MyGlobalWorkspace.load_from_checkpoint(checkpoint_path, map_location=DEVICE, weights_only=False)
     return gw.eval()
 
 
@@ -151,7 +139,8 @@ def show_image(image: torch.Tensor, title: str) -> None:
 # --- Rotations enchaînées : comparaison des espaces de rotation ---
 
 # Voies de rotation, de la plus riche à la plus symbolique, et le module de
-# rotation (gw.rotation_mods) de chacune
+# rotation (gw.rotation_mods) de chacune ; seules les voies dont le module a
+# été entraîné (cf `rotation_paths`) sont évaluées
 ROTATION_MODULES = {"pixel": "pixel", "VAE": "vae", "GW": "gw", "GW via digit": "gw_digit", "GW fusionné": "gw_fused",
                     "digit": "digit"}
 ROTATION_PATHS = tuple(ROTATION_MODULES)
@@ -167,31 +156,40 @@ CURVE_COLORS = {"pixel": "C0", "VAE": "C1", "GW": "C2", "GW via digit": "C4", "G
                 EXACT_DIGIT: "C3", REFERENCE: "black", VAE_FLOOR: "C1", GW_FLOOR: "C2", SYMBOLIC_FLOOR: "C4"}
 
 
+def rotation_paths(gw: MyGlobalWorkspace) -> tuple[str, ...]:
+    """Voies de rotation dont le module existe dans `gw` (rotations activées dans sa config)."""
+    return tuple(path for path in ROTATION_PATHS if ROTATION_MODULES[path] in gw.rotation_mods)
+
+
+def rotation_degrees(gw: MyGlobalWorkspace) -> float:
+    return gw.config["global_workspace"]["rotation_operations"]["degrees"]
+
+
 def rotate_digit_angle(digits: torch.Tensor, degrees: float) -> torch.Tensor:
     """Rotation exacte dans l'espace digit : chiffre inchangé, angle + `degrees`."""
     return torch.cat([digits[:, :BASE], angle_to_cos_sin(cos_sin_to_angle(digits[:, BASE:]) + degrees)], dim=-1)
 
 
 def start_states(gw: MyGlobalWorkspace, images: torch.Tensor) -> dict[str, torch.Tensor]:
-    """Point de départ de chaque voie (et de la rotation exacte) dans son espace.
+    """Point de départ de chaque voie de `gw` (et de la rotation exacte) dans son espace.
     Les voies passant par digit partent du vecteur digit propre, comme à l'entraînement."""
     gw_state = image_to_gw(gw, images)
     digits = clean_digit(from_gw(gw, "digit", gw_state))
     gw_digit_state = to_gw(gw, "digit", digits)
-    return {
+    states = {
         "pixel": images,
         "VAE": gw.gw_mod.domain_mods["image"].encode(images),
         "GW": gw_state,
         "GW via digit": gw_digit_state,
         "GW fusionné": 0.5 * (gw_state + gw_digit_state),
         "digit": digits,
-        EXACT_DIGIT: digits,
     }
+    return {path: states[path] for path in rotation_paths(gw)} | {EXACT_DIGIT: digits}
 
 
 def rotate_states(gw: MyGlobalWorkspace, states: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Une rotation de plus sur chaque voie."""
-    degrees = gw.rotation_mods["gw"].degrees
+    degrees = rotation_degrees(gw)
     return {
         path: rotate_digit_angle(state, degrees) if path == EXACT_DIGIT else gw.rotation_mods[ROTATION_MODULES[path]](state)
         for path, state in states.items()
@@ -215,8 +213,8 @@ def chained_rotations(
     """Applique 1 à `max_n` fois les rotations apprises. Pour chaque courbe, chaque n
     et chaque image, tenseurs (max_n, images) parmi : "mse" (image vs vraie
     rotation), "correct" (chiffre reconnu) et "angle_error" (°).
-    Les voies de rotation (cf `path_outputs`), toutes lues par le même lecteur
-    (le décodeur digit du GW) :
+    Les voies de rotation entraînées dans `gw` (cf `path_outputs`), toutes lues
+    par le même lecteur (le décodeur digit du GW) :
      - pixel : rotation sur l'image ;
      - VAE : rotation sur le latent du VAE ;
      - GW : rotation sur l'état GW ;
@@ -231,8 +229,8 @@ def chained_rotations(
        le VAE, le GW ou le GW puis digit propre, le mieux que les voies correspondantes
        puissent faire en pixels."""
     image_mod = gw.gw_mod.domain_mods["image"]
-    degrees = gw.rotation_mods["gw"].degrees
-    results = {path: {"mse": [], "correct": [], "angle_error": []} for path in (*ROTATION_PATHS, EXACT_DIGIT)}
+    degrees = rotation_degrees(gw)
+    results = {path: {"mse": [], "correct": [], "angle_error": []} for path in (*rotation_paths(gw), EXACT_DIGIT)}
     results |= {REFERENCE: {"correct": [], "angle_error": []},
                 VAE_FLOOR: {"mse": []}, GW_FLOOR: {"mse": []}, SYMBOLIC_FLOOR: {"mse": []}}
 
@@ -265,7 +263,7 @@ def plot_chained_rotations(results: dict[str, dict[str, torch.Tensor]], title: s
     """Moyennes sur les images, en fonction du nombre de rotations enchaînées.
     Traits pleins : voies de rotation ; pointillés : référence et planchers
     (un plancher a la couleur de la voie qu'il borne)."""
-    max_n = results["GW"]["mse"].shape[0]
+    max_n = results[REFERENCE]["correct"].shape[0]
     ns = range(1, max_n + 1)
     fig, axes = plt.subplots(1, 3, figsize=(18, 4.5))
     for ax, (metric, ylabel, chance) in zip(axes, [
@@ -303,8 +301,8 @@ def plot_per_digit(results: dict[str, dict[str, torch.Tensor]], labels: torch.Te
     """Précision et erreur d'angle par chiffre (lignes) et par nombre de rotations
     (colonnes), pour chaque voie, la rotation exacte et la référence."""
     labels = labels.cpu()
-    paths = [*ROTATION_PATHS, EXACT_DIGIT, REFERENCE]
-    max_n = results["GW"]["correct"].shape[0]
+    paths = [*(path for path in ROTATION_PATHS if path in results), EXACT_DIGIT, REFERENCE]
+    max_n = results[REFERENCE]["correct"].shape[0]
     fig, axes = plt.subplots(2, len(paths), figsize=(4.5 * len(paths), 9))
     for row, (metric, label, cmap, vmax, fmt) in enumerate([
         ("correct", "précision sur le chiffre", "RdYlGn", 1, "{:.0%}"),
@@ -328,7 +326,6 @@ def plot_per_digit(results: dict[str, dict[str, torch.Tensor]], labels: torch.Te
     plt.show()
 
 
-TRANSFORM_COLUMNS = ("réel", *ROTATION_PATHS)
 COLUMN_TITLES = {"GW via digit": "GW (d)", "GW fusionné": "GW (f)"}  # titre court : les colonnes sont étroites
 
 
@@ -336,10 +333,12 @@ def show_chained_rotations(gw: MyGlobalWorkspace, images: torch.Tensor, max_n: i
                            n_images: int = 3, cell_size: float = 0.55) -> None:
     """Suivi pas à pas des rotations enchaînées : une ligne par étape (angle
     cumulé), et pour chaque image un bloc de colonnes : vraie rotation, puis
-    chaque voie (pixel, VAE, GW, GW via digit, GW fusionné, digit). À l'étape 0, chaque voie
+    chaque voie entraînée (pixel, VAE, GW, GW via digit, GW fusionné, digit). À l'étape 0, chaque voie
     montre son point de départ (image d'origine, reconstruction par le VAE,
     demi-cycle par le GW, cycle par digit, moyenne des deux)."""
-    degrees = gw.rotation_mods["gw"].degrees
+    degrees = rotation_degrees(gw)
+    paths = rotation_paths(gw)
+    columns = ("réel", *paths)
     images = images[:n_images]
 
     states = start_states(gw, images)
@@ -348,9 +347,9 @@ def show_chained_rotations(gw: MyGlobalWorkspace, images: torch.Tensor, max_n: i
         if n > 0:
             states = rotate_states(gw, states)
         steps.append({"réel": rotate_by(images, degrees * n)}
-                     | {path: path_outputs(gw, path, states[path])[0] for path in ROTATION_PATHS})
+                     | {path: path_outputs(gw, path, states[path])[0] for path in paths})
     # un bloc de colonnes par image, séparés par une colonne vide étroite
-    n_cols = len(TRANSFORM_COLUMNS)
+    n_cols = len(columns)
     width_ratios = ([1] * n_cols + [0.4]) * n_images
     width_ratios.pop()
     fig, axes = plt.subplots(
@@ -362,7 +361,7 @@ def show_chained_rotations(gw: MyGlobalWorkspace, images: torch.Tensor, max_n: i
         ax.axis("off")
     for n, step in enumerate(steps):
         for i in range(n_images):
-            for c, name in enumerate(TRANSFORM_COLUMNS):
+            for c, name in enumerate(columns):
                 ax = axes[n, i * (n_cols + 1) + c]
                 ax.imshow(step[name][i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
                 if n == 0:

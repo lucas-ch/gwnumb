@@ -56,7 +56,10 @@ global_workspace:
     # degrees : angle de la rotation apprise, commun à toutes les variantes.
     # n_steps : nombre de rotations enchaînées dans la loss (1 = une seule
     #    rotation) ; la loss est la moyenne sur les étapes 1..n_steps.
+    # enabled : variantes construites et entraînées ; les autres sont ignorées
+    #    (pas de module, pas de loss), leurs sections peuvent rester.
     rotation_operations:
+        enabled: [pixel, vae, gw, gw_digit, gw_fused, digit]
         degrees: 20.0
         n_steps: 4
         pixel:
