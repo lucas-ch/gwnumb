@@ -9,7 +9,7 @@ from torchvision import datasets, transforms
 from numb_project.constants import BASE, DEVICE
 from numb_project.gw_model import MyGlobalWorkspace
 from numb_project.mnist_vae import VAE
-from numb_project.utils import angle_to_cos_sin, clean_digit, cos_sin_to_angle, rotate_images
+from numb_project.utils import angle_to_cos_sin, clean_digit, cos_sin_to_angle, rotate_digit_angle, rotate_images
 
 
 # --- Chargement des modèles ---
@@ -165,14 +165,11 @@ def rotation_degrees(gw: MyGlobalWorkspace) -> float:
     return gw.config["global_workspace"]["rotation_operations"]["degrees"]
 
 
-def rotate_digit_angle(digits: torch.Tensor, degrees: float) -> torch.Tensor:
-    """Rotation exacte dans l'espace digit : chiffre inchangé, angle + `degrees`."""
-    return torch.cat([digits[:, :BASE], angle_to_cos_sin(cos_sin_to_angle(digits[:, BASE:]) + degrees)], dim=-1)
-
-
 def start_states(gw: MyGlobalWorkspace, images: torch.Tensor) -> dict[str, torch.Tensor]:
     """Point de départ de chaque voie de `gw` (et de la rotation exacte) dans son espace.
-    Les voies passant par digit partent du vecteur digit propre, comme à l'entraînement."""
+    Les voies passant par digit partent du vecteur digit propre *perçu* (image ->
+    GW -> digit), et non du vrai digit utilisé à l'entraînement : on évalue la
+    perception et l'opération ensemble."""
     gw_state = image_to_gw(gw, images)
     digits = clean_digit(from_gw(gw, "digit", gw_state))
     gw_digit_state = to_gw(gw, "digit", digits)

@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -61,7 +63,7 @@ def test_digit_angle_domain_loss_is_cross_entropy_on_digit_plus_weighted_angle_m
 
     loss = domain.compute_loss(pred, target, raw_target=None)
 
-    digit_loss = F.cross_entropy(logits[:, :BASE], labels)
+    digit_loss = F.cross_entropy(logits[:, :BASE], labels) / math.log(BASE)
     angle_loss = F.mse_loss(pred[:, BASE:], target[:, BASE:])
     assert torch.isclose(loss.loss, digit_loss + 2.0 * angle_loss)
 
@@ -72,3 +74,37 @@ def test_digit_loss_stays_finite_when_a_probability_underflows() -> None:
     target = torch.cat([F.one_hot(torch.tensor([1]), BASE).float(), torch.tensor([[1.0, 0.0]])], dim=-1)
 
     assert torch.isfinite(domain.compute_loss(pred, target, raw_target=None).loss)
+
+
+def test_mnist_domain_loss_is_mse_normalized_by_latent_variance() -> None:
+    domain = MNISTDomain(VAE(latent_dim=4), latent_variance=0.5)
+    pred, target = torch.randn(3, 4), torch.randn(3, 4)
+
+    loss = domain.compute_loss(pred, target, raw_target=None)
+
+    assert torch.isclose(loss.loss, F.mse_loss(pred, target) / 0.5)
+    assert "latent_variance" in domain.state_dict()
+
+
+def test_mnist_domain_loss_is_one_when_predicting_the_mean() -> None:
+    target = torch.randn(10000, 4) * 3
+    domain = MNISTDomain(VAE(latent_dim=4), latent_variance=target.var(dim=0).mean().item())
+
+    loss = domain.compute_loss(target.mean(dim=0).expand_as(target), target, raw_target=None)
+
+    assert torch.isclose(loss.loss, torch.tensor(1.0), atol=1e-3)
+
+
+def test_digit_loss_is_one_for_uniform_probabilities_and_random_angles() -> None:
+    domain = DigitAngleDomain()
+    n = 20000
+    angles = torch.rand(n, 2) * 2 * torch.pi
+    target = torch.cat([F.one_hot(torch.randint(0, BASE, (n,)), BASE).float(),
+                        torch.stack([angles[:, 0].cos(), angles[:, 0].sin()], dim=-1)], dim=-1)
+    pred = torch.cat([torch.full((n, BASE), 1 / BASE),
+                      torch.stack([angles[:, 1].cos(), angles[:, 1].sin()], dim=-1)], dim=-1)
+
+    loss = domain.compute_loss(pred, target, raw_target=None)
+
+    # cross entropy normalisée = 1, MSE angle ~ 1
+    assert torch.isclose(loss.loss, torch.tensor(2.0), atol=0.05)

@@ -45,6 +45,10 @@ def cos_sin_to_angle(cos_sin: torch.Tensor) -> torch.Tensor:
     (cos, sin) n'a pas besoin d'être de norme 1)."""
     return torch.rad2deg(torch.atan2(cos_sin[..., 1], cos_sin[..., 0])) % 360
 
+def rotate_digit_angle(digits: torch.Tensor, degrees: float) -> torch.Tensor:
+    """Rotation exacte dans l'espace digit : chiffre inchangé, angle + `degrees`."""
+    return torch.cat([digits[:, :BASE], angle_to_cos_sin(cos_sin_to_angle(digits[:, BASE:]) + degrees)], dim=-1)
+
 def clean_digit(digits: torch.Tensor) -> torch.Tensor:
     """Version « propre » d'un vecteur digit prédit : one-hot exact du chiffre
     lu (argmax) et (cos, sin) ramené à la norme 1. Ne garde que le chiffre et

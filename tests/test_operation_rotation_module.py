@@ -10,7 +10,7 @@ from numb_project.operation_rotation_module import (
     PixelRotateOperationModule,
     chained_rotation_targets,
 )
-from numb_project.utils import angle_to_cos_sin, clean_digit, rotate_images
+from numb_project.utils import angle_to_cos_sin, clean_digit, rotate_digit_angle, rotate_images
 from tests.test_gw_model import GW_SIZE, HIDDEN_DIM, IMAGE_DIM, IMAGE_SHAPE, SpatialIdentityDomain
 
 BATCH_SIZE = 3
@@ -82,40 +82,56 @@ def test_latent_losses_with_chained_steps_train_only_the_rotation_module() -> No
         assert all(p.grad is None for p in gw_mod.gw_decoders.parameters())
 
 
-def test_latent_module_encodes_images_in_its_space() -> None:
+def test_image_spaces_encode_the_image() -> None:
     gw_mod = make_gw_mod()
-    image = make_raw_data()[frozenset(["image", "digit"])]["image"]
+    group = make_raw_data()[frozenset(["image", "digit"])]
+    image, digit = group["image"], group["digit"]
 
-    gw_state = LatentRotateOperationModule("gw", GW_SIZE).encode(gw_mod, image)
-    vae_latent = LatentRotateOperationModule("vae", IMAGE_DIM).encode(gw_mod, image)
+    gw_state = LatentRotateOperationModule("gw", GW_SIZE).encode(gw_mod, image, digit)
+    vae_latent = LatentRotateOperationModule("vae", IMAGE_DIM).encode(gw_mod, image, digit)
 
     assert gw_state.shape == (BATCH_SIZE, GW_SIZE)
     assert gw_state.abs().max() <= 1
     assert torch.equal(vae_latent, gw_mod.domain_mods["image"].encode(image))
 
 
-def test_symbolic_spaces_go_through_the_digit_domain() -> None:
+def test_symbolic_spaces_use_the_true_digit() -> None:
     gw_mod = make_gw_mod()
-    image = make_raw_data()[frozenset(["image", "digit"])]["image"]
+    group = make_raw_data()[frozenset(["image", "digit"])]
+    image, digit = group["image"], group["digit"]
 
-    digit = LatentRotateOperationModule("digit", DIGIT_DIM).encode(gw_mod, image)
-    gw_digit = LatentRotateOperationModule("gw_digit", GW_SIZE).encode(gw_mod, image)
+    encoded_digit = LatentRotateOperationModule("digit", DIGIT_DIM).encode(gw_mod, image, digit)
+    gw_digit = LatentRotateOperationModule("gw_digit", GW_SIZE).encode(gw_mod, image, digit)
 
-    image_state = torch.tanh(gw_mod.gw_encoders["image"](gw_mod.domain_mods["image"].encode(image)))
-    expected_digit = clean_digit(gw_mod.gw_decoders["digit"](image_state))
-    assert torch.allclose(digit, expected_digit)
-    assert torch.allclose(gw_digit, torch.tanh(gw_mod.gw_encoders["digit"](expected_digit)))
+    assert torch.equal(encoded_digit, digit)
+    assert torch.allclose(gw_digit, torch.tanh(gw_mod.gw_encoders["digit"](digit)))
 
 
 def test_fused_space_averages_gw_and_gw_digit_states() -> None:
     gw_mod = make_gw_mod()
-    image = make_raw_data()[frozenset(["image", "digit"])]["image"]
+    group = make_raw_data()[frozenset(["image", "digit"])]
+    image, digit = group["image"], group["digit"]
 
-    fused = LatentRotateOperationModule("gw_fused", GW_SIZE).encode(gw_mod, image)
+    fused = LatentRotateOperationModule("gw_fused", GW_SIZE).encode(gw_mod, image, digit)
 
-    gw_state = LatentRotateOperationModule("gw", GW_SIZE).encode(gw_mod, image)
-    gw_digit = LatentRotateOperationModule("gw_digit", GW_SIZE).encode(gw_mod, image)
+    gw_state = LatentRotateOperationModule("gw", GW_SIZE).encode(gw_mod, image, digit)
+    gw_digit = LatentRotateOperationModule("gw_digit", GW_SIZE).encode(gw_mod, image, digit)
     assert torch.allclose(fused, 0.5 * (gw_state + gw_digit))
+
+
+def test_digit_loss_targets_are_the_exactly_rotated_true_digit() -> None:
+    module = LatentRotateOperationModule("digit", DIGIT_DIM, hidden_size=HIDDEN_DIM, latent_dim=HIDDEN_DIM, n_steps=2)
+    raw_data = make_raw_data()
+    digit = raw_data[frozenset(["image", "digit"])]["digit"]
+
+    loss = module.loss(make_gw_mod(), raw_data)
+
+    first = module(digit)
+    expected = torch.stack([
+        F.mse_loss(first, rotate_digit_angle(digit, module.degrees)),
+        F.mse_loss(module(first), rotate_digit_angle(digit, 2 * module.degrees)),
+    ]).mean()
+    assert torch.isclose(loss, expected)
 
 
 def test_clean_digit_keeps_only_digit_and_angle() -> None:

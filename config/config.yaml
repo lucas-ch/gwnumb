@@ -1,6 +1,7 @@
 domains:
     # Domaine digit = one-hot du chiffre + (cos, sin) de l'angle de l'image.
-    # Poids de la MSE sur l'angle par rapport à la MSE sur le chiffre.
+    # Poids de la MSE sur l'angle par rapport à la cross entropy sur le chiffre
+    # (les deux sont normalisées : 0 = parfait, ~1 = hasard).
     digit:
         angle_loss_weight: 1.0
 
