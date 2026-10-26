@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 import torch
-from shimmer import ContrastiveLoss, DomainModule, GWModule, LossOutput, SingleDomainSelection
+from shimmer import ContrastiveLoss, DomainModule, GWDecoder, GWModule, LossOutput, SingleDomainSelection
 from torch import nn
 import torch.nn.functional as F
 
@@ -11,6 +11,7 @@ from numb_project.domain_module import DigitAngleDomain
 from numb_project.gw_model import (
     MyCustomGWLosses,
     MyGlobalWorkspace,
+    DigitGWDecoder,
     build_gw_encoders_decoders,
     build_rotation_modules,
     get_global_workspace_mods,
@@ -270,7 +271,7 @@ class TestModuleFunctions:
         assert all(mod.n_steps == 2 for mod in rotation_mods.values())
         assert set(gw_mod.domain_mods.keys()) == {"image", "digit"}
         # les domaines doivent être des sous-modules du GW (state_dict, .to(device))
-        assert any(name.startswith("domain_mods.digit.") for name in gw_mod.state_dict())
+        assert any(module is gw_mod.domain_mods["digit"] for module in gw_mod.modules())
 
     def test_build_rotation_modules_sizes_each_latent_space(self) -> None:
         rotation_mods = build_rotation_modules(ROTATION_OPERATIONS_CONFIG, gw_size=GW_SIZE, vae_size=20, digit_size=DIGIT_DIM)
@@ -321,3 +322,17 @@ class TestConfigInCheckpoint:
         assert set(reloaded.rotation_mods.keys()) == {"pixel", "gw_fused"}
         for name, value in workspace.state_dict().items():
             assert torch.equal(reloaded.state_dict()[name], value)
+
+
+
+
+def test_build_gw_encoders_decoders_constrains_only_the_digit_decoder() -> None:
+    _, gw_decoders = build_gw_encoders_decoders(make_domain_modules(), GW_SIZE, HIDDEN_DIM, 1, HIDDEN_DIM, 1)
+
+    digit = gw_decoders["digit"](torch.randn(4, GW_SIZE) * 5)
+
+    assert isinstance(gw_decoders["digit"], DigitGWDecoder)
+    assert type(gw_decoders["image"]) is GWDecoder
+    assert (digit[:, :BASE] >= 0).all()
+    assert torch.allclose(digit[:, :BASE].sum(dim=-1), torch.ones(4))
+    assert torch.allclose(digit[:, BASE:].norm(dim=-1), torch.ones(4))

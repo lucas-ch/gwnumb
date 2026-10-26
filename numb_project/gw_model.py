@@ -8,7 +8,7 @@ from torch.optim import AdamW
 import torch.nn.functional as F
 
 from numb_project.constants import BASE, DEVICE
-from numb_project.domain_module import get_domains_config, load_domain_modules
+from numb_project.domain_module import DigitAngleDomain, get_domains_config, load_domain_modules
 from numb_project.operation_rotation_module import LatentRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import angle_to_cos_sin, rotate_images
 from numb_project.utils import get_from_dict_or_val
@@ -130,6 +130,18 @@ def make_rotated_gw_batch(raw_data: RawDomainGroupsT) -> RawDomainGroupsT:
 
     return {domains: rotate_group(group) for domains, group in raw_data.items()}
 
+class DigitGWDecoder(GWDecoder):
+    """Décodeur GW -> latent du domaine digit : le MLP de GWDecoder, suivi d'un
+    softmax sur les BASE premières dimensions (probabilités des chiffres) et
+    d'une normalisation de (cos, sin). Toutes les prédictions digit (traductions,
+    demi-cycles, cycles, passages par digit des rotations) restent ainsi dans
+    l'espace des digits : simplexe des chiffres x cercle des angles."""
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        x = super().forward(z)
+        return torch.cat([F.softmax(x[:, :BASE], dim=-1), F.normalize(x[:, BASE:], dim=-1)], dim=-1)
+
+
 def build_gw_encoders_decoders(
     domain_modules: Mapping[str, DomainModule],
     workspace_dim: int,
@@ -140,7 +152,9 @@ def build_gw_encoders_decoders(
 ) -> tuple[nn.ModuleDict, nn.ModuleDict]:
     """Crée (non entraînés) un encodeur latent du domaine -> GW et un décodeur
     GW -> latent du domaine pour chaque domaine. Les tailles cachées et nombres
-    de couches sont soit communs (int), soit donnés par domaine (dict)."""
+    de couches sont soit communs (int), soit donnés par domaine (dict).
+    Encodeurs : GWEncoder pour tous les domaines. Décodeurs : DigitGWDecoder
+    pour le domaine digit (sortie contrainte), GWDecoder pour les autres."""
     gw_encoders: dict[str, nn.Module] = {}
     gw_decoders: dict[str, nn.Module] = {}
     for name, module in domain_modules.items():
@@ -150,7 +164,13 @@ def build_gw_encoders_decoders(
             workspace_dim,
             get_from_dict_or_val(encoders_n_layers, name, "global_workspace.encoders.n_layers"),
         )
-        gw_decoders[name] = GWDecoder(
+        decoder_cls: type[GWDecoder]
+        match module:
+            case DigitAngleDomain():
+                decoder_cls = DigitGWDecoder
+            case _:
+                decoder_cls = GWDecoder
+        gw_decoders[name] = decoder_cls(
             workspace_dim,
             get_from_dict_or_val(decoders_hidden_dim, name, "global_workspace.decoders.hidden_dim"),
             module.latent_dim,

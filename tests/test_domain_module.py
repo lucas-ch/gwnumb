@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from numb_project.constants import BASE, DIGIT_DIM
 from numb_project.domain_module import (
     DigitAngleDomain,
-    IdentityDomain,
     LoadedDomainConfig,
     MNISTDomain,
     get_domains_config,
@@ -13,25 +12,6 @@ from numb_project.domain_module import (
 )
 from numb_project.mnist_vae import VAE
 
-
-def test_identity_domain_encode_decode_transform_are_identity() -> None:
-    domain = IdentityDomain(size=BASE)
-    x = torch.randn(3, BASE)
-
-    assert torch.equal(domain.encode(x), x)
-    assert torch.equal(domain.decode(x), x)
-    assert torch.equal(domain.transform(x), x)
-    assert torch.equal(domain.forward(x), x)
-
-
-def test_identity_domain_compute_loss_returns_mse() -> None:
-    domain = IdentityDomain(size=BASE)
-    pred = torch.randn(4, BASE)
-    target = torch.randn(4, BASE)
-
-    loss = domain.compute_loss(pred, target, raw_target=None)
-
-    assert torch.isclose(loss.loss, F.mse_loss(pred, target, reduction="mean"))
 
 
 def test_mnist_domain_wraps_vae_for_encode_decode_roundtrip() -> None:
@@ -60,7 +40,7 @@ def test_load_domain_module_digit_returns_digit_angle_domain() -> None:
     module = load_domain_module(LoadedDomainConfig(domain_type="digit", args={"angle_loss_weight": 0.5}))
 
     assert isinstance(module, DigitAngleDomain)
-    assert module.size == DIGIT_DIM
+    assert module.latent_dim == DIGIT_DIM
     assert module.angle_loss_weight == 0.5
 
 
@@ -72,13 +52,23 @@ def test_load_domain_modules_keys_modules_by_domain_type() -> None:
     assert isinstance(modules["digit"], DigitAngleDomain)
 
 
-def test_digit_angle_domain_loss_weights_digit_and_angle_parts_separately() -> None:
+def test_digit_angle_domain_loss_is_cross_entropy_on_digit_plus_weighted_angle_mse() -> None:
     domain = DigitAngleDomain(angle_loss_weight=2.0)
-    pred = torch.randn(4, DIGIT_DIM)
-    target = torch.randn(4, DIGIT_DIM)
+    logits = torch.randn(4, DIGIT_DIM)
+    pred = torch.cat([F.softmax(logits[:, :BASE], dim=-1), logits[:, BASE:]], dim=-1)
+    labels = torch.randint(0, BASE, (4,))
+    target = torch.cat([F.one_hot(labels, BASE).float(), torch.randn(4, 2)], dim=-1)
 
     loss = domain.compute_loss(pred, target, raw_target=None)
 
-    digit_loss = F.mse_loss(pred[:, :BASE], target[:, :BASE])
+    digit_loss = F.cross_entropy(logits[:, :BASE], labels)
     angle_loss = F.mse_loss(pred[:, BASE:], target[:, BASE:])
     assert torch.isclose(loss.loss, digit_loss + 2.0 * angle_loss)
+
+
+def test_digit_loss_stays_finite_when_a_probability_underflows() -> None:
+    domain = DigitAngleDomain()
+    pred = torch.cat([F.one_hot(torch.tensor([0]), BASE).float(), torch.tensor([[1.0, 0.0]])], dim=-1)
+    target = torch.cat([F.one_hot(torch.tensor([1]), BASE).float(), torch.tensor([[1.0, 0.0]])], dim=-1)
+
+    assert torch.isfinite(domain.compute_loss(pred, target, raw_target=None).loss)

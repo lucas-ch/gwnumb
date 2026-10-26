@@ -5,7 +5,6 @@ import torch.nn.functional as F
 
 from numb_project.utils import clean_digit, rotate_images
 
-
 def image_to_gw_state(gw_mod: GWModule, image: torch.Tensor) -> torch.Tensor:
     image_latent = gw_mod.domain_mods["image"].encode(image)
     return gw_mod.fusion_activation_fn(gw_mod.gw_encoders["image"](image_latent))

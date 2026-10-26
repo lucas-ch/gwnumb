@@ -13,8 +13,7 @@ global_workspace:
         # retrouver le style de l'image à partir d'un chiffre et d'un angle, ce
         # que le modèle ne peut faire qu'en cachant le style dans les petits
         # écarts du vecteur digit (cf test_digit_space.ipynb).
-        cycles: 0.0
-        cycle_digit_through_image: 1.0
+        cycles: 1.0
         contrastives: 0.01
         demi_cycles: 1.0
         translations: 1.0
@@ -57,9 +56,9 @@ global_workspace:
     # n_steps : nombre de rotations enchaînées dans la loss (1 = une seule
     #    rotation) ; la loss est la moyenne sur les étapes 1..n_steps.
     # enabled : variantes construites et entraînées ; les autres sont ignorées
-    #    (pas de module, pas de loss), leurs sections peuvent rester.
+    #    (pas de module, pas de loss), leurs sections peuvent rester.  [pixel, vae, gw, gw_digit, gw_fused, digit]
     rotation_operations:
-        enabled: [pixel, vae, gw, gw_digit, gw_fused, digit]
+        enabled: [pixel, vae, gw_fused, digit]
         degrees: 20.0
         n_steps: 4
         pixel:
