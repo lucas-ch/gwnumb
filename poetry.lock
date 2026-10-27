@@ -341,6 +341,24 @@ files = [
 ]
 
 [[package]]
+name = "autograd"
+version = "1.9.1"
+description = "Efficiently computes derivatives of NumPy code."
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "autograd-1.9.1-py3-none-any.whl", hash = "sha256:b788bae3fa010cbffb4cfb7b8ba2a3f0daa6072a8506da6164c779fe9cf3e05a"},
+    {file = "autograd-1.9.1.tar.gz", hash = "sha256:7818c5c69ddf9efb7da74097bd741a4c7920133f41966f68537223a15ef798bc"},
+]
+
+[package.dependencies]
+numpy = "<3"
+
+[package.extras]
+scipy = ["scipy"]
+
+[[package]]
 name = "babel"
 version = "2.18.0"
 description = "Internationalization utilities"
@@ -827,6 +845,28 @@ files = [
     {file = "defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61"},
     {file = "defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69"},
 ]
+
+[[package]]
+name = "escnn"
+version = "1.0.11"
+description = "E(n)-Equivariant CNNs Library for PyTorch"
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "escnn-1.0.11-py3-none-any.whl", hash = "sha256:0097a3752e317be70bccf0bb14fc9674fbb859ae5ddd735b8cf35a8533f6f536"},
+    {file = "escnn-1.0.11.tar.gz", hash = "sha256:c2e086e39e0215b163ac2f0df66e0e5691eda06f7fb6f541bd45239e831d3e51"},
+]
+
+[package.dependencies]
+autograd = "*"
+joblib = "*"
+lie-learn = "*"
+numpy = "*"
+py3nj = "*"
+pymanopt = "*"
+scipy = "*"
+torch = ">=1.3"
 
 [[package]]
 name = "executing"
@@ -1975,6 +2015,25 @@ packaging = "*"
 dev = ["changelist (==0.5)", "spin (==0.15)"]
 lint = ["pre-commit (==4.3.0)"]
 test = ["coverage[toml] (>=7.2)", "pytest (>=8.0)", "pytest-cov (>=5.0)"]
+
+[[package]]
+name = "lie-learn"
+version = "0.0.2"
+description = "A python package that knows how to do various tricky computations related to Lie groups and manifolds (mainly the sphere S2 and rotation group SO3)."
+optional = false
+python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,>2.7"
+groups = ["main"]
+files = [
+    {file = "lie_learn-0.0.2-cp310-cp310-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c9bcaa0cc5ca6b9ca6b8fb551468214b52e728f58a8f63c2555b84474279ea63"},
+    {file = "lie_learn-0.0.2-cp311-cp311-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:985cfa99ac344abba11b9381a0b7c60766db1accf23462640fb35ba35c1a789b"},
+    {file = "lie_learn-0.0.2-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b5ca0bacfbbf7ede6003da6555eaaa61a8baaf1c78b352e8f7cc3ea2e0f6c7b4"},
+    {file = "lie_learn-0.0.2-cp39-cp39-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d838de6c5815a5fb921b71afaf8567a81647f01710c916e8fbb41d95a0f80ca3"},
+]
+
+[package.dependencies]
+numpy = {version = "<2", markers = "python_version >= \"3.0\""}
+requests = "*"
+scipy = {version = "*", markers = "python_version >= \"3.0\""}
 
 [[package]]
 name = "lightning"
@@ -3330,6 +3389,23 @@ files = [
 tests = ["pytest"]
 
 [[package]]
+name = "py3nj"
+version = "0.2.1"
+description = "numpy compatible wigner 3n-J symbols"
+optional = false
+python-versions = "~=3.8"
+groups = ["main"]
+files = [
+    {file = "py3nj-0.2.1.tar.gz", hash = "sha256:3f9a79b3b18a51570c835c174a941f3cd3b552d1d3414debebeb70ce759512fe"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[package.extras]
+test = ["pytest"]
+
+[[package]]
 name = "pycparser"
 version = "3.0"
 description = "C parser in Python"
@@ -3511,6 +3587,33 @@ files = [
 
 [package.extras]
 windows-terminal = ["colorama (>=0.4.6)"]
+
+[[package]]
+name = "pymanopt"
+version = "2.2.1"
+description = "Toolbox for optimization on Riemannian manifolds with support for automatic differentiation"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "pymanopt-2.2.1-py3-none-any.whl", hash = "sha256:75fb11cc924252c8f045779a8ed4b054ddb805a540c314989598d60447560818"},
+    {file = "pymanopt-2.2.1.tar.gz", hash = "sha256:c784929a436eb06d73371b53ae5db3cdc19c5e60280f8131553bc805cbf7a1da"},
+]
+
+[package.dependencies]
+numpy = ">=1.16.0"
+scipy = ">=1.0,<1.10.dev0 || >=1.13.dev0"
+
+[package.extras]
+all = ["pymanopt[backends,dev]"]
+autograd = ["autograd (>=1.2)"]
+backends = ["pymanopt[autograd,jax,tensorflow,torch]"]
+ci = ["build (==0.8.0)", "pip (==22.3.1)", "setuptools (==66.1.0)", "wheel (==0.38.4)"]
+dev = ["black[jupyter] (==22.3.0)", "flake8 (==5.0.4)", "flake8-bugbear (==22.12.6)", "flake8-docstrings (==1.6.0)", "flake8-import-order (==0.18.2)", "flake8-pyproject (==1.2.2)", "isort (==5.11.5)", "matplotlib", "pre-commit", "pytest (==7.2.0)", "pytest-cov (==4.0.0)"]
+docs = ["docutils (==0.16)", "ipykernel (==6.4.2)", "myst-parser (==0.16.1)", "nbsphinx (==0.8.7)", "sphinx (==4.2.0)", "sphinx-rtd-theme (==1.0.0)", "sphinxcontrib-katex (==0.8.6)"]
+jax = ["jax (>=0.2.0)", "jaxlib"]
+tensorflow = ["tensorflow (>=2.0.0)"]
+torch = ["torch (>=1.0.0)"]
 
 [[package]]
 name = "pyparsing"
@@ -5065,4 +5168,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11, <3.12"
-content-hash = "28132c0360bcca691fc510119315a73c1768f709e51ae1fb7f476caff6b88dfb"
+content-hash = "6dca58c29d9e5c6fe15b778cbe09252b9b5773143fc77b7fcdd79d85a7a6c394"

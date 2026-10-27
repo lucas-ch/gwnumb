@@ -24,6 +24,7 @@ dependencies = [
     "scikit-learn (>=1.8.0,<2.0.0)",
     "scikit-image (>=0.26.0,<0.27.0)",
     "mpltern (>=1.0.4,<2.0.0)",
+    "escnn (>=1.0.11,<2.0.0)",
 ]
 
 [tool.poetry]

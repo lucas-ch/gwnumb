@@ -21,8 +21,9 @@ def load_global_workspace(checkpoint_path: str) -> MyGlobalWorkspace:
     return gw.eval()
 
 
-def load_vae(checkpoint_path: str) -> VAE:
-    vae = VAE.load_from_checkpoint(checkpoint_path, map_location=DEVICE)
+def load_vae(checkpoint_path: str, vae_cls: type[VAE] = VAE) -> VAE:
+    """VAE gelé ; `vae_cls` : classe du checkpoint (VAE ou EquivariantVAE)."""
+    vae = vae_cls.load_from_checkpoint(checkpoint_path, map_location=DEVICE)
     vae.freeze()
     return vae
 
