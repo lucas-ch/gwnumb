@@ -54,7 +54,7 @@ def get_training_objects(
     }
 
 def main() -> None:
-    run_name = 'rotation_with_cycles'
+    run_name = 'rotation_weight'
     checkpoint_path = None
 
     config = get_config(checkpoint_path)

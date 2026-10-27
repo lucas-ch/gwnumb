@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from numb_project.constants import BASE, DEVICE
 from numb_project.domain_module import DigitAngleDomain, get_domains_config, load_domain_modules
-from numb_project.operation_rotation_module import LatentRotateOperationModule, PixelRotateOperationModule
+from numb_project.operation_rotation_module import FusedRotateOperationModule, LatentRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import angle_to_cos_sin, rotate_images
 from numb_project.utils import get_from_dict_or_val
 
@@ -49,6 +49,9 @@ class MyGlobalWorkspace(GlobalWorkspaceBase):
         batch_size = raw_group["digit"].shape[0]
         for name, metric in loss_output.all.items():
             self.log(f"{mode}/{name}", metric, batch_size=batch_size, add_dataloader_idx=False)
+        if "vae_digit" in self.rotation_mods:
+            self.log(f"{mode}/vae_digit_image_weight", self.rotation_mods["vae_digit"].image_weight,
+                     batch_size=batch_size, add_dataloader_idx=False)
 
         return loss_output.loss
 
@@ -183,7 +186,9 @@ def build_rotation_modules(
 ) -> nn.ModuleDict:
     """Une rotation apprise par espace listé dans `rotation_config["enabled"]`,
     parmi : pixels, latent du VAE, état du GW, état du GW passé par digit,
-    fusion des deux états GW, vecteur digit."""
+    fusion des deux états GW, vecteur digit, et "vae_digit" (rotations "vae" et
+    "digit" fusionnées dans le GW, qui réutilise ces deux modules : ils doivent
+    être activés aussi)."""
     common = {"degrees": rotation_config["degrees"], "n_steps": rotation_config["n_steps"]}
     latent_sizes = {"vae": vae_size, "gw": gw_size, "gw_digit": gw_size, "gw_fused": gw_size, "digit": digit_size}
 
@@ -194,7 +199,16 @@ def build_rotation_modules(
         return LatentRotateOperationModule(space, latent_sizes[space], rotation_config[space]["hidden_size"],
                                            rotation_config[space]["latent_dim"], **common)
 
-    return nn.ModuleDict({space: build(space) for space in rotation_config["enabled"]})
+    enabled = rotation_config["enabled"]
+    mods = {space: build(space) for space in enabled if space != "vae_digit"}
+    if "vae_digit" in enabled:
+        assert "vae" in mods and "digit" in mods, "vae_digit réutilise les rotations vae et digit : les activer aussi"
+        vae_digit_config = rotation_config["vae_digit"]
+        mods["vae_digit"] = FusedRotateOperationModule(
+            mods["vae"], mods["digit"], vae_digit_config["image_weight"],
+            # absent des configs des checkpoints antérieurs : poids fixe
+            vae_digit_config.get("learn_image_weight", False), **common)
+    return nn.ModuleDict({space: mods[space] for space in enabled})
 
 def get_global_workspace_mods(
         config: dict[str, Any],

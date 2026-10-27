@@ -1,5 +1,6 @@
 from shimmer import GWModule, GWModuleBase, RawDomainGroupsT
 from torch import nn
+from torch.func import functional_call
 import torch
 import torch.nn.functional as F
 
@@ -179,5 +180,102 @@ class LatentRotateOperationModule(nn.Module):
         for target in targets:
             pred = self(pred)
             losses.append(F.mse_loss(pred, target))
+
+        return torch.stack(losses).mean()
+
+
+def frozen_call(module: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """`module(x)` avec ses paramètres détachés : le gradient traverse le module
+    (vers ce qui produit `x`) sans mettre à jour ses poids."""
+    params = {name: param.detach() for name, param in module.named_parameters()}
+    return functional_call(module, params, (x,))
+
+
+class FusedRotateOperationModule(nn.Module):
+    """Rotation faite séparément dans le latent du VAE (module "vae") et dans
+    l'espace digit (module "digit"), puis fusionnée dans le GW :
+        gw = tanh(image_weight · E_image(R_vae(v)) + (1 - image_weight) · E_digit(R_digit(d)))
+    puis décodée dans les deux domaines. Les deux modules de rotation sont
+    partagés avec les variantes "vae" et "digit" et ne sont entraînés que par
+    leur propre loss : ils sont gelés pour cette loss (cf `frozen_call`), les
+    rotations ne dépendent donc que de leur espace. C'est le GW (encodeurs et
+    décodeurs) que cette loss entraîne, à combiner les deux rotations.
+
+    `image_weight` est fixe, ou appris par cette loss si `learn_image_weight`
+    (paramétré par sigmoid(logit) pour rester dans ]0, 1[, initialisé à
+    `image_weight`).
+
+    Rotations enchaînées : chaque étape repart des décodages du GW fusionné
+    (latent VAE, digit décodé), le GW servant de point de synchronisation
+    entre les deux domaines. Rien n'est nettoyé (pas de `clean_digit`) : tout
+    est différentiable et le gradient traverse toute la chaîne."""
+
+    def __init__(
+        self,
+        vae_rotation: "LatentRotateOperationModule",
+        digit_rotation: "LatentRotateOperationModule",
+        image_weight: float = 0.5,
+        learn_image_weight: bool = False,
+        degrees: float = 20.0,
+        n_steps: int = 1,
+    ):
+        super().__init__()
+        assert vae_rotation.space == "vae" and digit_rotation.space == "digit"
+        assert 0 < image_weight < 1, "image_weight doit être dans ]0, 1["
+        self.vae_rotation = vae_rotation
+        self.digit_rotation = digit_rotation
+        logit = torch.logit(torch.tensor(image_weight))
+        if learn_image_weight:
+            self.image_weight_logit = nn.Parameter(logit)
+        else:
+            # non persistant : un poids fixe n'apparaît pas dans le checkpoint
+            self.register_buffer("image_weight_logit", logit, persistent=False)
+        self.degrees = degrees
+        self.n_steps = n_steps
+
+    @property
+    def image_weight(self) -> torch.Tensor:
+        """Poids de la branche vae dans la fusion (celle de digit vaut 1 - image_weight)."""
+        return torch.sigmoid(self.image_weight_logit)
+
+    def fuse_and_decode(
+        self, gw_mod: GWModule, vae_latent: torch.Tensor, digit: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """(latent VAE, digit) -> fusion dans le GW (poids image_weight /
+        1 - image_weight) -> (latent VAE, digit) décodés."""
+        encodings = {"image": gw_mod.gw_encoders["image"](vae_latent), "digit": gw_mod.gw_encoders["digit"](digit)}
+        weights = self.image_weight.expand(digit.shape[0])
+        gw_state = gw_mod.fuse(encodings, {"image": weights, "digit": 1 - weights})
+        return gw_mod.gw_decoders["image"](gw_state), gw_mod.gw_decoders["digit"](gw_state)
+
+    def step(self, gw_mod: GWModule, vae_latent: torch.Tensor, digit: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Une rotation : (latent VAE, digit) -> (latent VAE, digit) décodés du
+        GW fusionné. Modules de rotation gelés, GW entraîné."""
+        return self.fuse_and_decode(gw_mod, frozen_call(self.vae_rotation, vae_latent),
+                                    frozen_call(self.digit_rotation, digit))
+
+    def loss(
+        self,
+        gw_mod: GWModule,
+        raw_data: RawDomainGroupsT,
+    ) -> torch.Tensor:
+        # À chaque étape : loss du domaine image (MSE normalisée) sur le latent
+        # VAE décodé + loss du domaine digit sur le digit décodé, vs la vérité
+        # tournée de k x degrees (VAE de l'image tournée, vrai digit tourné).
+        group = raw_data[frozenset({"digit", "image"})]
+        image, digit = group['image'], group['digit']
+        image_mod, digit_mod = gw_mod.domain_mods["image"], gw_mod.domain_mods["digit"]
+
+        with torch.no_grad():
+            vae_latent = image_mod.encode(image)
+            vae_targets = [image_mod.encode(rotated)
+                           for rotated in chained_rotation_targets(image, self.degrees, self.n_steps)]
+        digit_targets = chained_digit_targets(digit, self.degrees, self.n_steps)
+
+        losses = []
+        for vae_target, digit_target in zip(vae_targets, digit_targets):
+            vae_latent, digit = self.step(gw_mod, vae_latent, digit)
+            losses.append(image_mod.compute_loss(vae_latent, vae_target, None).loss
+                          + digit_mod.compute_loss(digit, digit_target, None).loss)
 
         return torch.stack(losses).mean()

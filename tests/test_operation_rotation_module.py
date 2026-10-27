@@ -6,6 +6,7 @@ from numb_project.constants import BASE, DIGIT_DIM
 from numb_project.domain_module import DigitAngleDomain
 from numb_project.gw_model import build_gw_encoders_decoders
 from numb_project.operation_rotation_module import (
+    FusedRotateOperationModule,
     LatentRotateOperationModule,
     PixelRotateOperationModule,
     chained_rotation_targets,
@@ -160,3 +161,93 @@ def test_only_gw_modules_outputs_are_bounded_by_tanh() -> None:
     assert gw_fused_module(torch.tanh(x)).abs().max() <= 1
     assert vae_module(x).abs().max() > 1
     assert digit_module(x).abs().max() > 1
+
+
+def make_fused_module(image_weight: float = 0.5, n_steps: int = 2, learn_image_weight: bool = False) -> FusedRotateOperationModule:
+    vae = LatentRotateOperationModule("vae", IMAGE_DIM, hidden_size=HIDDEN_DIM, latent_dim=HIDDEN_DIM)
+    digit = LatentRotateOperationModule("digit", DIGIT_DIM, hidden_size=HIDDEN_DIM, latent_dim=HIDDEN_DIM)
+    return FusedRotateOperationModule(vae, digit, image_weight=image_weight, learn_image_weight=learn_image_weight,
+                                      n_steps=n_steps)
+
+
+def test_fused_loss_trains_the_gw_but_not_the_rotation_modules() -> None:
+    gw_mod = make_gw_mod()
+    module = make_fused_module(n_steps=3)
+
+    loss = module.loss(gw_mod, make_raw_data())
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert all(p.grad is None for p in module.vae_rotation.parameters())
+    assert all(p.grad is None for p in module.digit_rotation.parameters())
+    assert all(p.grad is not None for p in gw_mod.gw_encoders.parameters())
+    assert all(p.grad is not None for p in gw_mod.gw_decoders.parameters())
+
+
+def test_fused_step_fuses_the_two_rotations_with_the_given_weights() -> None:
+    gw_mod = make_gw_mod()
+    module = make_fused_module(image_weight=0.25)
+    group = make_raw_data()[frozenset(["image", "digit"])]
+    vae_latent = gw_mod.domain_mods["image"].encode(group["image"])
+
+    decoded_latent, decoded_digit = module.step(gw_mod, vae_latent, group["digit"])
+
+    gw_state = torch.tanh(
+        0.25 * gw_mod.gw_encoders["image"](module.vae_rotation(vae_latent))
+        + 0.75 * gw_mod.gw_encoders["digit"](module.digit_rotation(group["digit"]))
+    )
+    assert torch.allclose(decoded_latent, gw_mod.gw_decoders["image"](gw_state), atol=1e-6)
+    assert torch.allclose(decoded_digit, gw_mod.gw_decoders["digit"](gw_state), atol=1e-6)
+
+
+def test_fused_loss_sums_both_domain_losses_against_the_rotated_truth() -> None:
+    gw_mod = make_gw_mod()
+    module = make_fused_module(n_steps=1)
+    raw_data = make_raw_data()
+    group = raw_data[frozenset(["image", "digit"])]
+    image_mod, digit_mod = gw_mod.domain_mods["image"], gw_mod.domain_mods["digit"]
+
+    loss = module.loss(gw_mod, raw_data)
+
+    decoded_latent, decoded_digit = module.step(gw_mod, image_mod.encode(group["image"]), group["digit"])
+    rotated_image = rotate_images(group["image"], torch.full((BATCH_SIZE,), module.degrees))
+    expected = (image_mod.compute_loss(decoded_latent, image_mod.encode(rotated_image), None).loss
+                + digit_mod.compute_loss(decoded_digit, rotate_digit_angle(group["digit"], module.degrees), None).loss)
+    assert torch.isclose(loss, expected)
+
+
+def test_fused_chain_restarts_from_the_decoded_digit_without_cleaning() -> None:
+    gw_mod = make_gw_mod()
+    module = make_fused_module(n_steps=2)
+    raw_data = make_raw_data()
+    group = raw_data[frozenset(["image", "digit"])]
+    image_mod, digit_mod = gw_mod.domain_mods["image"], gw_mod.domain_mods["digit"]
+
+    loss = module.loss(gw_mod, raw_data)
+
+    latent_1, digit_1 = module.step(gw_mod, image_mod.encode(group["image"]), group["digit"])
+    latent_2, digit_2 = module.step(gw_mod, latent_1, digit_1)
+    expected = torch.stack([
+        image_mod.compute_loss(latent, image_mod.encode(rotate_images(group["image"], torch.full((BATCH_SIZE,), k * module.degrees))), None).loss
+        + digit_mod.compute_loss(digit, rotate_digit_angle(group["digit"], k * module.degrees), None).loss
+        for k, (latent, digit) in enumerate([(latent_1, digit_1), (latent_2, digit_2)], start=1)
+    ]).mean()
+    assert torch.isclose(loss, expected)
+
+
+def test_learned_image_weight_is_trained_by_the_fused_loss() -> None:
+    module = make_fused_module(image_weight=0.3, learn_image_weight=True)
+
+    module.loss(make_gw_mod(), make_raw_data()).backward()
+
+    assert torch.isclose(module.image_weight, torch.tensor(0.3))
+    assert module.image_weight_logit.grad is not None
+    assert "image_weight_logit" in module.state_dict()
+
+
+def test_fixed_image_weight_is_neither_trained_nor_saved() -> None:
+    module = make_fused_module(image_weight=0.3)
+
+    assert torch.isclose(module.image_weight, torch.tensor(0.3))
+    assert not any(name == "image_weight_logit" for name, _ in module.named_parameters())
+    assert "image_weight_logit" not in module.state_dict()

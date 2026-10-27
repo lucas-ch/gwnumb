@@ -25,14 +25,16 @@ global_workspace:
         rotate_pixel_loss_rotated: 1.0
         rotate_vae_loss: 1.0
         rotate_vae_loss_rotated: 1.0
-        rotate_gw_loss: 1.0
-        rotate_gw_loss_rotated: 1.0
-        rotate_gw_digit_loss: 1.0
-        rotate_gw_digit_loss_rotated: 1.0
-        rotate_gw_fused_loss: 1.0
-        rotate_gw_fused_loss_rotated: 1.0
+        rotate_gw_loss: 0.0
+        rotate_gw_loss_rotated: 0.0
+        rotate_gw_digit_loss: 0.0
+        rotate_gw_digit_loss_rotated: 0.0
+        rotate_gw_fused_loss: 0.0
+        rotate_gw_fused_loss_rotated: 0.0
         rotate_digit_loss: 1.0
         rotate_digit_loss_rotated: 1.0
+        rotate_vae_digit_loss: 1.0
+        rotate_vae_digit_loss_rotated: 1.0
     encoders:
         hidden_dim:
             image: 256
@@ -46,10 +48,16 @@ global_workspace:
     #    d'étranglement entre l'encodeur et le décodeur convolutifs.
     #  - vae   : dans le latent du VAE (mu, 20D), MLP ;
     #  - gw    : dans l'espace du global workspace (10D), même MLP ;
-    #  - gw_digit : dans le GW après passage par digit (image -> GW -> digit
-    #    -> GW, 10D) : ne garde que chiffre et angle, sans le style ;
+    #  - gw_digit : dans le GW, encodage du vrai digit (10D) : ne contient que
+    #    chiffre et angle, sans le style ;
     #  - gw_fused : fusion des deux états GW précédents, 0.5 (gw + gw_digit), 10D ;
-    #  - digit : dans le domaine digit lu par le GW (image -> GW -> digit, 12D).
+    #  - digit : dans le domaine digit (vrai digit, 12D) ;
+    #  - vae_digit : rotations vae et digit fusionnées dans le GW, décodées
+    #    dans les deux domaines ; réutilise les modules vae et digit (à activer
+    #    aussi), gelés pour cette loss : elle n'entraîne que le GW. image_weight = poids de la branche vae dans la
+    #    fusion (celle de digit vaut 1 - image_weight), dans ]0, 1[ ;
+    #    learn_image_weight : true = poids appris par la loss vae_digit, à
+    #    partir de image_weight ; false = poids fixe.
     #    Pour les espaces latents : hidden_size = largeur des couches denses et
     #    latent_dim = taille de la couche intermédiaire ; garder les mêmes
     #    valeurs pour que seul l'espace diffère.
@@ -59,7 +67,7 @@ global_workspace:
     # enabled : variantes construites et entraînées ; les autres sont ignorées
     #    (pas de module, pas de loss), leurs sections peuvent rester.  [pixel, vae, gw, gw_digit, gw_fused, digit]
     rotation_operations:
-        enabled: [pixel, vae, gw_fused, digit]
+        enabled: [pixel, vae, digit, vae_digit]
         degrees: 20.0
         n_steps: 4
         pixel:
@@ -79,6 +87,9 @@ global_workspace:
         digit:
             hidden_size: 64
             latent_dim: 32
+        vae_digit:
+            image_weight: 0.5
+            learn_image_weight: true
 
     decoders:
         hidden_dim:

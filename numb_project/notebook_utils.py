@@ -142,7 +142,7 @@ def show_image(image: torch.Tensor, title: str) -> None:
 # rotation (gw.rotation_mods) de chacune ; seules les voies dont le module a
 # été entraîné (cf `rotation_paths`) sont évaluées
 ROTATION_MODULES = {"pixel": "pixel", "VAE": "vae", "GW": "gw", "GW via digit": "gw_digit", "GW fusionné": "gw_fused",
-                    "digit": "digit"}
+                    "digit": "digit", "VAE + digit": "vae_digit", "VAE + digit séparés": "vae_digit"}
 ROTATION_PATHS = tuple(ROTATION_MODULES)
 EXACT_DIGIT = "rotation exacte de l'angle lu (digit)"
 REFERENCE = "référence : vraie rotation lue par le GW"
@@ -153,6 +153,7 @@ SYMBOLIC_FLOOR = "plancher symbolique (vraie rotation → GW → digit propre �
 # borne à la fois « GW via digit » et « digit » ; la rotation exacte a la
 # couleur de la voie digit, dont elle est la version idéale
 CURVE_COLORS = {"pixel": "C0", "VAE": "C1", "GW": "C2", "GW via digit": "C4", "GW fusionné": "C5", "digit": "C3",
+                "VAE + digit": "C6", "VAE + digit séparés": "C7",
                 EXACT_DIGIT: "C3", REFERENCE: "black", VAE_FLOOR: "C1", GW_FLOOR: "C2", SYMBOLIC_FLOOR: "C4"}
 
 
@@ -165,7 +166,24 @@ def rotation_degrees(gw: MyGlobalWorkspace) -> float:
     return gw.config["global_workspace"]["rotation_operations"]["degrees"]
 
 
-def start_states(gw: MyGlobalWorkspace, images: torch.Tensor) -> dict[str, torch.Tensor]:
+def format_fusion_weights(gw: MyGlobalWorkspace) -> str:
+    """Poids de la fusion des voies « VAE + digit » (ceux du module vae_digit,
+    utilisés par `rotate_state` et `path_outputs`), appris ou fixes."""
+    if "vae_digit" not in gw.rotation_mods:
+        return "pas de fusion VAE + digit dans ce modèle"
+    fused = gw.rotation_mods["vae_digit"]
+    image_weight = fused.image_weight.item()
+    learned = isinstance(fused.image_weight_logit, torch.nn.Parameter)
+    return (f"fusion VAE + digit : poids vae = {image_weight:.3f}, poids digit = {1 - image_weight:.3f} "
+            f"({'appris' if learned else 'fixe'})")
+
+
+# état d'une voie : un tenseur, ou (latent VAE, digit) pour « VAE + digit » et
+# « VAE + digit séparés »
+PathState = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+
+
+def start_states(gw: MyGlobalWorkspace, images: torch.Tensor) -> dict[str, PathState]:
     """Point de départ de chaque voie de `gw` (et de la rotation exacte) dans son espace.
     Les voies passant par digit partent du vecteur digit propre *perçu* (image ->
     GW -> digit), et non du vrai digit utilisé à l'entraînement : on évalue la
@@ -173,28 +191,49 @@ def start_states(gw: MyGlobalWorkspace, images: torch.Tensor) -> dict[str, torch
     gw_state = image_to_gw(gw, images)
     digits = clean_digit(from_gw(gw, "digit", gw_state))
     gw_digit_state = to_gw(gw, "digit", digits)
+    vae_latent = gw.gw_mod.domain_mods["image"].encode(images)
     states = {
         "pixel": images,
-        "VAE": gw.gw_mod.domain_mods["image"].encode(images),
+        "VAE": vae_latent,
         "GW": gw_state,
         "GW via digit": gw_digit_state,
         "GW fusionné": 0.5 * (gw_state + gw_digit_state),
         "digit": digits,
+        "VAE + digit": (vae_latent, digits),
+        "VAE + digit séparés": (vae_latent, digits),
     }
     return {path: states[path] for path in rotation_paths(gw)} | {EXACT_DIGIT: digits}
 
 
-def rotate_states(gw: MyGlobalWorkspace, states: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def rotate_state(gw: MyGlobalWorkspace, path: str, state: PathState) -> PathState:
+    """Une rotation de plus sur une voie. « VAE + digit » repart des décodages du
+    GW fusionné, sans nettoyer le digit, comme à l'entraînement. « VAE + digit
+    séparés » enchaîne les rotations VAE et digit chacune dans son espace, la
+    fusion ne servant qu'à lire le résultat (cf `path_outputs`)."""
+    if path == EXACT_DIGIT:
+        return rotate_digit_angle(state, rotation_degrees(gw))
+    if path == "VAE + digit":
+        return gw.rotation_mods["vae_digit"].step(gw.gw_mod, *state)
+    if path == "VAE + digit séparés":
+        vae_latent, digits = state
+        fused = gw.rotation_mods["vae_digit"]
+        return fused.vae_rotation(vae_latent), fused.digit_rotation(digits)
+    return gw.rotation_mods[ROTATION_MODULES[path]](state)
+
+
+def rotate_states(gw: MyGlobalWorkspace, states: dict[str, PathState]) -> dict[str, PathState]:
     """Une rotation de plus sur chaque voie."""
-    degrees = rotation_degrees(gw)
-    return {
-        path: rotate_digit_angle(state, degrees) if path == EXACT_DIGIT else gw.rotation_mods[ROTATION_MODULES[path]](state)
-        for path, state in states.items()
-    }
+    return {path: rotate_state(gw, path, state) for path, state in states.items()}
 
 
-def path_outputs(gw: MyGlobalWorkspace, path: str, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def path_outputs(gw: MyGlobalWorkspace, path: str, state: PathState) -> tuple[torch.Tensor, torch.Tensor]:
     """(image produite, vecteur digit lu par le décodeur digit du GW) pour l'état d'une voie."""
+    if path == "VAE + digit":  # déjà décodé du GW dans les deux domaines
+        vae_latent, digits = state
+        return gw.gw_mod.domain_mods["image"].decode(vae_latent), digits
+    if path == "VAE + digit séparés":
+        vae_latent, digits = gw.rotation_mods["vae_digit"].fuse_and_decode(gw.gw_mod, *state)
+        return gw.gw_mod.domain_mods["image"].decode(vae_latent), digits
     if path == "pixel":
         return state, from_gw(gw, "digit", image_to_gw(gw, state))
     if path == "VAE":
@@ -217,7 +256,11 @@ def chained_rotations(
      - GW : rotation sur l'état GW ;
      - GW via digit : rotation sur l'état GW passé par digit (image -> GW -> digit propre -> GW) ;
      - GW fusionné : rotation sur 0.5 (GW + GW via digit) ;
-     - digit : rotation sur le vecteur digit propre lu par le GW.
+     - digit : rotation sur le vecteur digit propre lu par le GW ;
+     - VAE + digit : rotations VAE et digit fusionnées dans le GW, puis décodées ;
+       chaque rotation repart de ces décodages ;
+     - VAE + digit séparés : rotations VAE et digit enchaînées chacune dans son
+       espace, fusionnées dans le GW et décodées seulement pour la lecture.
     Les courbes de comparaison :
      - EXACT_DIGIT : digit lu au départ, angle tourné exactement de k x degrees,
        le mieux que la voie digit puisse faire ;
@@ -323,14 +366,16 @@ def plot_per_digit(results: dict[str, dict[str, torch.Tensor]], labels: torch.Te
     plt.show()
 
 
-COLUMN_TITLES = {"GW via digit": "GW (d)", "GW fusionné": "GW (f)"}  # titre court : les colonnes sont étroites
+COLUMN_TITLES = {"GW via digit": "GW (d)", "GW fusionné": "GW (f)", "VAE + digit": "V+D",
+                 "VAE + digit séparés": "V+D (s)"}  # titre court : les colonnes sont étroites
 
 
 def show_chained_rotations(gw: MyGlobalWorkspace, images: torch.Tensor, max_n: int = 12,
                            n_images: int = 3, cell_size: float = 0.55) -> None:
     """Suivi pas à pas des rotations enchaînées : une ligne par étape (angle
     cumulé), et pour chaque image un bloc de colonnes : vraie rotation, puis
-    chaque voie entraînée (pixel, VAE, GW, GW via digit, GW fusionné, digit). À l'étape 0, chaque voie
+    chaque voie entraînée (pixel, VAE, GW, GW via digit, GW fusionné, digit,
+    VAE + digit, VAE + digit séparés). À l'étape 0, chaque voie
     montre son point de départ (image d'origine, reconstruction par le VAE,
     demi-cycle par le GW, cycle par digit, moyenne des deux)."""
     degrees = rotation_degrees(gw)

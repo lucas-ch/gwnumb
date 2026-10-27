@@ -72,9 +72,11 @@ LOSS_COEFS = {
     "rotate_gw_fused_loss_rotated": 1.0,
     "rotate_digit_loss": 1.0,
     "rotate_digit_loss_rotated": 1.0,
+    "rotate_vae_digit_loss": 1.0,
+    "rotate_vae_digit_loss_rotated": 1.0,
 }
 ROTATION_OPERATIONS_CONFIG = {
-    "enabled": ["pixel", "vae", "gw", "gw_digit", "gw_fused", "digit"],
+    "enabled": ["pixel", "vae", "gw", "gw_digit", "gw_fused", "digit", "vae_digit"],
     "degrees": 30.0,
     "n_steps": 2,
     "pixel": {"latent_dim": HIDDEN_DIM},
@@ -83,6 +85,7 @@ ROTATION_OPERATIONS_CONFIG = {
     "gw_digit": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
     "gw_fused": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
     "digit": {"hidden_size": HIDDEN_DIM, "latent_dim": HIDDEN_DIM},
+    "vae_digit": {"image_weight": 0.5, "learn_image_weight": True},
 }
 
 
@@ -139,9 +142,12 @@ class TestMyGlobalWorkspace:
     def test_init_stores_rotation_submodules(self, workspace_and_batch) -> None:
         workspace, _ = workspace_and_batch
 
-        assert set(workspace.rotation_mods.keys()) == {"pixel", "vae", "gw", "gw_digit", "gw_fused", "digit"}
+        assert set(workspace.rotation_mods.keys()) == {"pixel", "vae", "gw", "gw_digit", "gw_fused", "digit", "vae_digit"}
         assert isinstance(workspace.rotation_mods["pixel"], PixelRotateOperationModule)
         assert all(workspace.rotation_mods[space].space == space for space in ("vae", "gw", "gw_digit", "gw_fused", "digit"))
+        # la rotation fusionnée réutilise les modules vae et digit
+        assert workspace.rotation_mods["vae_digit"].vae_rotation is workspace.rotation_mods["vae"]
+        assert workspace.rotation_mods["vae_digit"].digit_rotation is workspace.rotation_mods["digit"]
         assert workspace.gw_mod is workspace.loss_mod.gw_mod
 
     def test_configure_optimizers_returns_adamw(self, workspace_and_batch) -> None:
@@ -267,7 +273,7 @@ class TestModuleFunctions:
         assert isinstance(selection_mod, SingleDomainSelection)
         assert isinstance(loss_mod, MyCustomGWLosses)
         assert loss_mod.rotation_mods is rotation_mods
-        assert {name: mod.degrees for name, mod in rotation_mods.items()} == {"pixel": 30.0, "vae": 30.0, "gw": 30.0, "gw_digit": 30.0, "gw_fused": 30.0, "digit": 30.0}
+        assert {name: mod.degrees for name, mod in rotation_mods.items()} == {"pixel": 30.0, "vae": 30.0, "gw": 30.0, "gw_digit": 30.0, "gw_fused": 30.0, "digit": 30.0, "vae_digit": 30.0}
         assert all(mod.n_steps == 2 for mod in rotation_mods.values())
         assert set(gw_mod.domain_mods.keys()) == {"image", "digit"}
         # les domaines doivent être des sous-modules du GW (state_dict, .to(device))
@@ -281,6 +287,12 @@ class TestModuleFunctions:
         assert rotation_mods["gw_digit"](torch.randn(2, GW_SIZE)).shape == (2, GW_SIZE)
         assert rotation_mods["gw_fused"](torch.randn(2, GW_SIZE)).shape == (2, GW_SIZE)
         assert rotation_mods["digit"](torch.randn(2, DIGIT_DIM)).shape == (2, DIGIT_DIM)
+
+    def test_vae_digit_requires_the_vae_and_digit_rotations(self) -> None:
+        config = ROTATION_OPERATIONS_CONFIG | {"enabled": ["vae", "vae_digit"]}
+
+        with pytest.raises(AssertionError):
+            build_rotation_modules(config, gw_size=GW_SIZE, vae_size=20, digit_size=DIGIT_DIM)
 
     def test_build_rotation_modules_only_builds_enabled_spaces(self) -> None:
         config = ROTATION_OPERATIONS_CONFIG | {"enabled": ["gw", "gw_fused"]}
