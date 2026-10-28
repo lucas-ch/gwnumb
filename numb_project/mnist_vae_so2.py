@@ -43,7 +43,7 @@ def make_gspace() -> gspaces.GSpace2D:
     return gspaces.rot2dOnR2(N=-1, maximum_frequency=MAX_FREQUENCY)
 
 
-def fourier_elu(gspace: gspaces.GSpace2D, channels: int) -> enn.FourierELU:
+def fourier_elu(gspace: gspaces.GSpace, channels: int) -> enn.FourierELU:
     """Non-linéarité sur `channels` champs de Fourier (fréquences 0..MAX_FREQUENCY,
     dimension 2 * MAX_FREQUENCY + 1 chacun) ; son `in_type` sert de type caché."""
     irreps = gspace.fibergroup.bl_irreps(MAX_FREQUENCY)
@@ -60,12 +60,21 @@ def blur_pool(field_type: enn.FieldType) -> list[enn.EquivariantModule]:
     ]
 
 
-def latent_types(gspace: gspaces.GSpace2D, n_scalars: int, n_vectors: int):
+def latent_types(gspace: gspaces.GSpace, n_scalars: int, n_vectors: int):
     """(type de mu, type de logvar) : mu = scalaires + vecteurs de fréquence 1,
     logvar = un scalaire par champ."""
     mu_type = enn.FieldType(gspace, [gspace.trivial_repr] * n_scalars + [gspace.irrep(1)] * n_vectors)
     logvar_type = enn.FieldType(gspace, [gspace.trivial_repr] * (n_scalars + n_vectors))
     return mu_type, logvar_type
+
+
+def rotate_fields(z: torch.Tensor, field_type: enn.FieldType, angle_deg: float) -> torch.Tensor:
+    """Action de `rotate_images(·, angle_deg)` sur des vecteurs (B, field_type.size)
+    de type `field_type`. Les angles positifs de rotate_images tournent dans le
+    sens horaire, ceux d'escnn dans le sens trigonométrique."""
+    g = field_type.fibergroup.element(-angle_deg * torch.pi / 180)
+    rho = torch.as_tensor(field_type.representation(g), dtype=z.dtype, device=z.device)
+    return z @ rho.T
 
 
 class SO2Encoder(nn.Module):
@@ -147,9 +156,7 @@ class SO2VAE(VAE):
         inchangés, vecteurs tournés. encoder(rotate_images(x, a)) ≈
         rotate_latent(encoder(x), a). Les angles positifs de rotate_images
         tournent dans le sens horaire, ceux d'escnn dans le sens trigonométrique."""
-        g = self.encoder.gspace.fibergroup.element(-angle_deg * torch.pi / 180)
-        rho = torch.as_tensor(self.encoder.mu_type.representation(g), dtype=z.dtype, device=z.device)
-        return z @ rho.T
+        return rotate_fields(z, self.encoder.mu_type, angle_deg)
 
 
 def main():

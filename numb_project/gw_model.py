@@ -8,7 +8,9 @@ from torch.optim import AdamW
 import torch.nn.functional as F
 
 from numb_project.constants import BASE, DEVICE
-from numb_project.domain_module import DigitAngleDomain, get_domains_config, load_domain_modules
+from numb_project.domain_module import DigitAngleDomain, MNISTDomain, get_domains_config, load_domain_modules
+from numb_project.equivariant_gw import EquivariantGWStructure, EquivariantMLP, field_type
+from numb_project.mnist_vae_so2 import SO2VAE
 from numb_project.operation_rotation_module import FusedRotateOperationModule, LatentRotateOperationModule, PixelRotateOperationModule
 from numb_project.utils import angle_to_cos_sin, rotate_images
 from numb_project.utils import get_from_dict_or_val
@@ -152,15 +154,32 @@ def build_gw_encoders_decoders(
     encoders_n_layers: int | Mapping[str, int],
     decoders_hidden_dim: int | Mapping[str, int],
     decoders_n_layers: int | Mapping[str, int],
+    gw_structure: EquivariantGWStructure | None = None,
 ) -> tuple[nn.ModuleDict, nn.ModuleDict]:
     """Crée (non entraînés) un encodeur latent du domaine -> GW et un décodeur
     GW -> latent du domaine pour chaque domaine. Les tailles cachées et nombres
     de couches sont soit communs (int), soit donnés par domaine (dict).
     Encodeurs : GWEncoder pour tous les domaines. Décodeurs : DigitGWDecoder
-    pour le domaine digit (sortie contrainte), GWDecoder pour les autres."""
+    pour le domaine digit (sortie contrainte), GWDecoder pour les autres.
+    Avec `gw_structure` (GW équivariant), le domaine image a un encodeur et un
+    décodeur équivariants (`EquivariantMLP`), les autres restent classiques."""
     gw_encoders: dict[str, nn.Module] = {}
     gw_decoders: dict[str, nn.Module] = {}
     for name, module in domain_modules.items():
+        if gw_structure is not None and isinstance(module, MNISTDomain):
+            assert isinstance(module.vae, SO2VAE), "GW équivariant : le domaine image doit utiliser le VAE so2"
+            vae_type = field_type(module.vae.hparams.n_scalars, module.vae.hparams.n_vectors)
+            gw_encoders[name] = EquivariantMLP(
+                vae_type, gw_structure.field_type,
+                get_from_dict_or_val(encoders_hidden_dim, name, "global_workspace.encoders.hidden_dim"),
+                get_from_dict_or_val(encoders_n_layers, name, "global_workspace.encoders.n_layers"),
+            )
+            gw_decoders[name] = EquivariantMLP(
+                gw_structure.field_type, vae_type,
+                get_from_dict_or_val(decoders_hidden_dim, name, "global_workspace.decoders.hidden_dim"),
+                get_from_dict_or_val(decoders_n_layers, name, "global_workspace.decoders.n_layers"),
+            )
+            continue
         gw_encoders[name] = GWEncoder(
             module.latent_dim,
             get_from_dict_or_val(encoders_hidden_dim, name, "global_workspace.encoders.hidden_dim"),
@@ -216,8 +235,12 @@ def get_global_workspace_mods(
     selection_mod = SingleDomainSelection()
     contrastive_fn = ContrastiveLoss(torch.tensor([1 / 0.07]).log(), "mean", False)
     gw_size = config["global_workspace"]["latent_dim"]
+    # Clés absentes des configs des checkpoints antérieurs : VAE convolutif, GW classique
+    vae = config["domains"].get("image", {}).get("vae", "conv")
+    equivariant_config = config["global_workspace"].get("equivariant")
+    gw_structure = None if equivariant_config is None else EquivariantGWStructure(gw_size, equivariant_config["n_vectors"])
 
-    domain_modules = load_domain_modules(get_domains_config(["image", "digit"], config["domains"]["digit"]))
+    domain_modules = load_domain_modules(get_domains_config(["image", "digit"], config["domains"]["digit"], vae))
     gw_encoders, gw_decoders = build_gw_encoders_decoders(
         domain_modules,
         gw_size,
@@ -225,6 +248,7 @@ def get_global_workspace_mods(
         config["global_workspace"]["encoders"]["n_layers"],
         config["global_workspace"]["decoders"]["hidden_dim"],
         config["global_workspace"]["decoders"]["n_layers"],
+        gw_structure,
     )
 
     gw_mod = GWModule(
@@ -232,7 +256,10 @@ def get_global_workspace_mods(
         workspace_dim=gw_size,
         gw_encoders=gw_encoders,
         gw_decoders=gw_decoders,
+        fusion_activation_fn=torch.tanh if gw_structure is None else gw_structure.fusion_activation(),
     )
+    # Structure de l'état du GW (None = GW classique), cf EquivariantGWStructure.rotate
+    gw_mod.gw_structure = gw_structure
 
     rotation_mods = build_rotation_modules(
         config["global_workspace"]["rotation_operations"], gw_size,

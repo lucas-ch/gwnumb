@@ -1,4 +1,9 @@
 domains:
+    # VAE du domaine image : conv (mnist_vae.py), c4 (équivariant aux rotations
+    # de 90°, mnist_vae_equivariant.py) ou so2 (équivariant à toutes les
+    # rotations, mnist_vae_so2.py).
+    image:
+        vae: so2
     # Domaine digit = one-hot du chiffre + (cos, sin) de l'angle de l'image.
     # Poids de la MSE sur l'angle par rapport à la cross entropy sur le chiffre
     # (les deux sont normalisées : 0 = parfait, ~1 = hasard).
@@ -7,6 +12,12 @@ domains:
 
 global_workspace:
     latent_dim: 10
+    # GW équivariant à SO(2) (cf equivariant_gw.py, nécessite `vae: so2`) : l'état
+    # du GW = latent_dim - 2 n_vectors scalaires (invariants) + n_vectors vecteurs
+    # (tournés avec l'image). Encodeur/décodeur GW image équivariants, digit
+    # classiques. Supprimer la section (ou null) pour un GW classique.
+    equivariant:
+        n_vectors: 2
 
     representation_loss_coefficients:
         # Cycles par direction plutôt que `cycles` (moyenne des deux) : le cycle

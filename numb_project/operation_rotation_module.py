@@ -93,7 +93,7 @@ class LatentRotateOperationModule(nn.Module):
     -> couche intermédiaire de taille `latent_dim` -> décodeur. L'espace est
     choisi par `space` (du plus riche au plus symbolique) :
      - "vae"      : latent du VAE (mu), non borné, rotation faite hors du GW ;
-     - "gw"       : état du global workspace (tanh de l'encodage GW), dans [-1, 1] ;
+     - "gw"       : état du global workspace (activation de fusion de l'encodage GW), dans ]-1, 1[ ;
      - "gw_digit" : encodage GW du vrai digit, qui ne contient que chiffre et angle ;
      - "gw_fused" : fusion des deux précédents, 0.5 (gw + gw_digit) ;
      - "digit"    : vrai vecteur digit (one-hot du chiffre + (cos, sin) de l'angle).
@@ -103,7 +103,7 @@ class LatentRotateOperationModule(nn.Module):
     que la cible digit ne dépende pas de la perception du GW."""
 
     SPACES = ("vae", "gw", "gw_digit", "gw_fused", "digit")
-    BOUNDED_SPACES = ("gw", "gw_digit", "gw_fused")  # états GW (ou leur moyenne), bornés par le tanh
+    BOUNDED_SPACES = ("gw", "gw_digit", "gw_fused")  # états GW (ou leur moyenne), bornés par l'activation de fusion
 
     def __init__(
         self,

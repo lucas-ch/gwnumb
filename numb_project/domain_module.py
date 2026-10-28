@@ -11,7 +11,17 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 
 from numb_project.mnist_vae import VAE
-from numb_project.constants import BASE, DIGIT_DIM, VAE_CHECKPOINT_FILE
+from numb_project.mnist_vae_equivariant import EquivariantVAE
+from numb_project.mnist_vae_so2 import SO2VAE
+from numb_project.constants import BASE, DIGIT_DIM, EQUIVARIANT_VAE_CHECKPOINT_FILE, SO2_VAE_CHECKPOINT_FILE, VAE_CHECKPOINT_FILE
+
+# VAE du domaine image, choisi par `domains.image.vae` dans la config :
+# classe et checkpoint
+VAES: dict[str, tuple[type[VAE], str]] = {
+    "conv": (VAE, VAE_CHECKPOINT_FILE),                         # mnist_vae.py
+    "c4": (EquivariantVAE, EQUIVARIANT_VAE_CHECKPOINT_FILE),    # mnist_vae_equivariant.py
+    "so2": (SO2VAE, SO2_VAE_CHECKPOINT_FILE),                   # mnist_vae_so2.py
+}
 
 
 class DigitAngleDomain(DomainModule):
@@ -48,13 +58,14 @@ class DigitAngleDomain(DomainModule):
         angle_loss = F.mse_loss(pred[:, BASE:], target[:, BASE:], reduction="mean")
         return LossOutput(digit_loss + self.angle_loss_weight * angle_loss)
 
-def mnist_latent_variance(vae: VAE, n_images: int = 10000) -> float:
+def mnist_latent_variance(vae: VAE, n_images: int = 10000, batch_size: int = 1000) -> float:
     """Variance des latents du VAE (mu), moyennée sur les dimensions, sur les
-    `n_images` premières images d'entraînement de MNIST."""
+    `n_images` premières images d'entraînement de MNIST. Encodage par lots : le
+    VAE SO(2) ne tient pas en mémoire GPU sur 10 000 images d'un coup."""
     dataset = datasets.MNIST(root="./data", train=True, download=True, transform=transforms.ToTensor())
     images = torch.stack([dataset[i][0] for i in range(n_images)]).to(vae.device)
     with torch.no_grad():
-        mu, _ = vae.encoder(images)
+        mu = torch.cat([vae.encoder(batch)[0] for batch in images.split(batch_size)])
     return mu.var(dim=0).mean().item()
 
 
@@ -66,7 +77,7 @@ class MNISTDomain(DomainModule):
     buffer : elle est enregistrée dans le checkpoint."""
 
     def __init__(self, vae: VAE, latent_variance: float = 1.0) -> None:
-        latent_dim = vae.encoder.fc_mu.out_features
+        latent_dim = vae.hparams.latent_dim
         super().__init__(latent_dim)
 
         self.vae = vae
@@ -99,10 +110,13 @@ class LoadedDomainConfig(BaseModel):
     domain_type: str
     args: Mapping[str, Any] = {}
 
-def get_domains_config(domains: list[str], digit_args: Mapping[str, Any] | None = None) -> list[LoadedDomainConfig]:
+def get_domains_config(
+    domains: list[str], digit_args: Mapping[str, Any] | None = None, vae: str = "conv"
+) -> list[LoadedDomainConfig]:
+    """`vae` : VAE du domaine image, clé de `VAES`."""
     domains_config = []
     if 'image' in domains:
-        domains_config.append(LoadedDomainConfig(domain_type="image", checkpoint_path=VAE_CHECKPOINT_FILE))
+        domains_config.append(LoadedDomainConfig(domain_type="image", checkpoint_path=VAES[vae][1], args={"vae": vae}))
     if 'digit' in domains:
         domains_config.append(LoadedDomainConfig(domain_type="digit", args=digit_args or {}))
 
@@ -112,7 +126,7 @@ def load_domain_module(domain: LoadedDomainConfig) -> DomainModule:
     module: DomainModule
     match domain.domain_type:
         case "image":
-            vae = VAE.load_from_checkpoint(domain.checkpoint_path)
+            vae = VAES[domain.args.get("vae", "conv")][0].load_from_checkpoint(domain.checkpoint_path)
             vae.eval()
             vae.freeze()
 
