@@ -238,14 +238,17 @@ class FusedRotateOperationModule(nn.Module):
         """Poids de la branche vae dans la fusion (celle de digit vaut 1 - image_weight)."""
         return torch.sigmoid(self.image_weight_logit)
 
+    def fuse(self, gw_mod: GWModule, vae_latent: torch.Tensor, digit: torch.Tensor) -> torch.Tensor:
+        """(latent VAE, digit) -> état du GW fusionné (poids image_weight / 1 - image_weight)."""
+        encodings = {"image": gw_mod.gw_encoders["image"](vae_latent), "digit": gw_mod.gw_encoders["digit"](digit)}
+        weights = self.image_weight.expand(digit.shape[0])
+        return gw_mod.fuse(encodings, {"image": weights, "digit": 1 - weights})
+
     def fuse_and_decode(
         self, gw_mod: GWModule, vae_latent: torch.Tensor, digit: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """(latent VAE, digit) -> fusion dans le GW (poids image_weight /
-        1 - image_weight) -> (latent VAE, digit) décodés."""
-        encodings = {"image": gw_mod.gw_encoders["image"](vae_latent), "digit": gw_mod.gw_encoders["digit"](digit)}
-        weights = self.image_weight.expand(digit.shape[0])
-        gw_state = gw_mod.fuse(encodings, {"image": weights, "digit": 1 - weights})
+        """(latent VAE, digit) -> fusion dans le GW -> (latent VAE, digit) décodés."""
+        gw_state = self.fuse(gw_mod, vae_latent, digit)
         return gw_mod.gw_decoders["image"](gw_state), gw_mod.gw_decoders["digit"](gw_state)
 
     def step(self, gw_mod: GWModule, vae_latent: torch.Tensor, digit: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
